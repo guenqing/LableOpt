@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+In agent mode, always `conda active parse` before any other command when using CLI. If you encounter `CondaError: Run 'conda init' before 'conda activate'`, try `bash -lc 'eval "$(conda shell.bash hook)" && conda activate parse && python {target_script.py} | cat'` or `/home/yangxinyu/Test/anaconda3/envs/parse/bin/python {target_script.py}`.

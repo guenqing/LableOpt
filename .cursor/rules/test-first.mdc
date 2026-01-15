@@ -1,0 +1,13 @@
+---
+alwaysApply: true
+---
+Unless required otherwise (e.g. if I say "no test"), ALWAYS test thoroughly (but not redundantly) before you modify existing scripts or create target scripts:
+1. make a TEST_{purpose} (**in snake_case**) folder under the current working directory. make copies of target scripts to start if it makes things smoother.
+2. write tests for every orthogonal aspect of the modification or addition, remember to add all necessary logging for your own feedback.
+3. run and update the test code until tests pass, then edit target script.
+4. repeat the process until the all scripts are working as expected.
+5. run comprehensive tests on the entire workflow to ensure everything is working as expected.
+6. after everthing works as expected, write **one and only summary document** into the `./DOC/` folder under the current working directory, including but not limited to: a. complete user guidance, b. overall workflow, c. key code snippets and explanations.
+7. finally, tell me which TEST_{purpose} folder should I retrospect.
+
+Whenever you are not sure what to test, ask me for help.
