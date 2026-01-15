@@ -101,38 +101,58 @@ class InteractiveAnnotator:
         self.view_width = fixed_width
         self.view_height = fixed_height
         
+        # Minimap settings (1/3 of main view)
+        self.minimap_scale = 3
+        self.minimap_width = fixed_width // self.minimap_scale
+        self.minimap_height = fixed_height // self.minimap_scale
+        self.minimap_dragging = False
+        
         with container:
-            # Main layout: image with scrollbars on right and bottom
-            with ui.column().classes('gap-0'):
-                # Row: image + vertical scrollbar
-                with ui.row().classes('gap-1 items-stretch'):
-                    # Image container with fixed size and overflow hidden
-                    with ui.element('div').classes('relative flex-none') \
-                            .style(f'width: {fixed_width}px; height: {fixed_height}px; overflow: hidden;') \
-                            as self.scroll_container:
-                        # Inner container for transform
-                        with ui.element('div').classes('inline-block') \
-                                .style('transform-origin: 0 0;') as self.transform_container:
-                            self.image_component = ui.interactive_image(
-                                source='',
-                                on_mouse=self._handle_mouse,
-                                events=['mousedown', 'mouseup', 'mousemove'],
-                                cross=False,
-                                sanitize=False,
-                            ).classes('block')
+            # Main layout: image area + minimap on right
+            with ui.row().classes('gap-4 items-start'):
+                # Left: Main image with scrollbars
+                with ui.column().classes('gap-0'):
+                    # Row: image + vertical scrollbar
+                    with ui.row().classes('gap-1 items-stretch'):
+                        # Image container with fixed size and overflow hidden
+                        with ui.element('div').classes('relative flex-none') \
+                                .style(f'width: {fixed_width}px; height: {fixed_height}px; overflow: hidden;') \
+                                as self.scroll_container:
+                            # Inner container for transform
+                            with ui.element('div').classes('inline-block') \
+                                    .style('transform-origin: 0 0;') as self.transform_container:
+                                self.image_component = ui.interactive_image(
+                                    source='',
+                                    on_mouse=self._handle_mouse,
+                                    events=['mousedown', 'mouseup', 'mousemove'],
+                                    cross=False,
+                                    sanitize=False,
+                                ).classes('block')
+                        
+                        # Vertical scrollbar on right
+                        self.v_scrollbar = ui.slider(
+                            min=0, max=100, value=0,
+                            on_change=self._on_v_scroll
+                        ).props('vertical dense').style(f'height: {fixed_height}px;')
                     
-                    # Vertical scrollbar on right
-                    self.v_scrollbar = ui.slider(
-                        min=0, max=100, value=0,
-                        on_change=self._on_v_scroll
-                    ).props('vertical dense').style(f'height: {fixed_height}px;')
+                    # Horizontal scrollbar at bottom
+                    with ui.row().classes('gap-1'):
+                        self.h_scrollbar = ui.slider(
+                            min=0, max=100, value=0,
+                            on_change=self._on_h_scroll
+                        ).props('dense').style(f'width: {fixed_width}px;')
                 
-                # Horizontal scrollbar at bottom
-                with ui.row().classes('gap-1'):
-                    self.h_scrollbar = ui.slider(
-                        min=0, max=100, value=0,
-                        on_change=self._on_h_scroll
-                    ).props('dense').style(f'width: {fixed_width}px;')
+                # Right: Minimap navigator
+                with ui.column().classes('gap-1'):
+                    ui.label('Navigator').classes('text-xs text-gray-500')
+                    self.minimap_component = ui.interactive_image(
+                        source='',
+                        on_mouse=self._handle_minimap_mouse,
+                        events=['mousedown', 'mouseup', 'mousemove'],
+                        cross=False,
+                        sanitize=False,
+                    ).style(f'width: {self.minimap_width}px; height: {self.minimap_height}px; object-fit: contain;') \
+                     .classes('border border-gray-300 rounded cursor-pointer')
             
             # Set up keyboard listener
             self.keyboard = ui.keyboard(on_key=self._handle_key, ignore=['input', 'select', 'textarea'])
@@ -147,6 +167,9 @@ class InteractiveAnnotator:
             self.image_width, self.image_height = get_image_size(path)
             if self.image_component:
                 self.image_component.set_source(image_path)
+            # Also load into minimap
+            if hasattr(self, 'minimap_component') and self.minimap_component:
+                self.minimap_component.set_source(image_path)
             # Reset zoom when loading new image
             self.reset_zoom()
         else:
@@ -376,6 +399,110 @@ class InteractiveAnnotator:
         
         transform = f'translate({translate_x}px, {translate_y}px) scale({self.zoom})'
         self.transform_container.style(f'transform: {transform}; transform-origin: 0 0;')
+        
+        # Update minimap viewport indicator
+        self._update_minimap()
+    
+    def _update_minimap(self) -> None:
+        """Update minimap with viewport indicator rectangle"""
+        if not hasattr(self, 'minimap_component') or not self.minimap_component:
+            return
+        if self.image_width <= 0 or self.image_height <= 0:
+            return
+        
+        # The minimap shows the FULL IMAGE, but scaled down to fit minimap_width x minimap_height
+        # The main view shows only a portion of the image (view_width x view_height at zoom=1x)
+        # 
+        # We need to calculate the scale factor between image coords and minimap display coords
+        # Minimap displays the full image, so:
+        #   minimap_scale_x = minimap_width / image_width
+        #   minimap_scale_y = minimap_height / image_height
+        # But since we use object-fit: contain, the actual scale is the min of these
+        
+        # For simplicity, let's calculate based on the image aspect ratio
+        img_aspect = self.image_width / self.image_height
+        minimap_aspect = self.minimap_width / self.minimap_height
+        
+        if img_aspect > minimap_aspect:
+            # Image is wider - width is the constraint
+            minimap_img_scale = self.minimap_width / self.image_width
+        else:
+            # Image is taller - height is the constraint
+            minimap_img_scale = self.minimap_height / self.image_height
+        
+        # The viewport in the main view (in image coordinates):
+        # Position: (pan_x, pan_y), Size: (view_width/zoom, view_height/zoom)
+        viewport_x = self.pan_x
+        viewport_y = self.pan_y
+        viewport_w = self.view_width / self.zoom
+        viewport_h = self.view_height / self.zoom
+        
+        # Convert to minimap coordinates
+        rect_x = viewport_x * minimap_img_scale
+        rect_y = viewport_y * minimap_img_scale
+        rect_w = viewport_w * minimap_img_scale
+        rect_h = viewport_h * minimap_img_scale
+        
+        # #region agent log
+        import json; open('/home/yangxinyu/Test/Projects/refiner/.cursor/debug.log', 'a').write(json.dumps({"location": "components.py:_update_minimap", "message": "minimap_update", "data": {"image_size": [self.image_width, self.image_height], "minimap_size": [self.minimap_width, self.minimap_height], "minimap_img_scale": minimap_img_scale, "viewport_img": [viewport_x, viewport_y, viewport_w, viewport_h], "rect_minimap": [rect_x, rect_y, rect_w, rect_h], "zoom": self.zoom}, "timestamp": __import__('time').time()*1000, "sessionId": "debug-session", "hypothesisId": "G"}) + '\n')
+        # #endregion
+        
+        # Only show viewport rect when zoomed in
+        if self.zoom > 1.0:
+            svg_content = f'''
+                <rect x="{rect_x}" y="{rect_y}" width="{rect_w}" height="{rect_h}"
+                      fill="rgba(59, 130, 246, 0.2)" stroke="#3b82f6" stroke-width="2"
+                      pointer-events="all" cursor="move" />
+            '''
+        else:
+            svg_content = ''
+        
+        self.minimap_component.set_content(svg_content)
+    
+    def _handle_minimap_mouse(self, e) -> None:
+        """Handle mouse events on minimap"""
+        event_type = e.type
+        
+        # Get click position in minimap coordinates (these are image coords scaled down)
+        x = e.image_x if hasattr(e, 'image_x') else 0
+        y = e.image_y if hasattr(e, 'image_y') else 0
+        
+        if event_type == 'mousedown':
+            self.minimap_dragging = True
+            # Center the viewport on click position
+            self._minimap_set_center(x, y)
+        elif event_type == 'mousemove' and self.minimap_dragging:
+            self._minimap_set_center(x, y)
+        elif event_type == 'mouseup':
+            self.minimap_dragging = False
+    
+    def _minimap_set_center(self, minimap_x: float, minimap_y: float) -> None:
+        """Set the main view pan so that the viewport is centered at the given minimap position
+        
+        Args:
+            minimap_x, minimap_y: Coordinates from interactive_image mouse event (in original image coords)
+        """
+        if self.zoom <= 1.0:
+            return
+        
+        # The minimap's interactive_image returns coordinates in the ORIGINAL IMAGE coordinate system
+        # (this is how ui.interactive_image works - it returns image coords regardless of display size)
+        # So minimap_x, minimap_y are already in image coordinates!
+        
+        # Set pan so that (minimap_x, minimap_y) is at the center of the viewport
+        visible_w = self.view_width / self.zoom
+        visible_h = self.view_height / self.zoom
+        
+        self.pan_x = minimap_x - visible_w / 2
+        self.pan_y = minimap_y - visible_h / 2
+        
+        # #region agent log
+        import json; open('/home/yangxinyu/Test/Projects/refiner/.cursor/debug.log', 'a').write(json.dumps({"location": "components.py:_minimap_set_center", "message": "minimap_click", "data": {"click_img_coords": [minimap_x, minimap_y], "visible_size": [visible_w, visible_h], "new_pan": [self.pan_x, self.pan_y]}, "timestamp": __import__('time').time()*1000, "sessionId": "debug-session", "hypothesisId": "G"}) + '\n')
+        # #endregion
+        
+        self._constrain_pan()
+        self._apply_transform()
+        self._update_scrollbars()
     
     def _constrain_pan(self) -> None:
         """Constrain pan to keep image visible in viewport"""
