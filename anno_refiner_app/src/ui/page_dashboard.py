@@ -327,8 +327,11 @@ class DashboardPage:
             self.goto_button.enable()
             self.refresh_button.enable()
             
-            total = len(app_state.results.overlooked) + len(app_state.results.swapped) + len(app_state.results.bad_located)
-            ui.notify(f'Found {total} potential issues.', type='positive')
+            # Show counts for each category (these are stored with top_k=1000 from cleanlab)
+            n_overlooked = len(app_state.results.overlooked)
+            n_swapped = len(app_state.results.swapped)
+            n_badloc = len(app_state.results.bad_located)
+            ui.notify(f'Analysis complete: {n_overlooked} overlooked, {n_swapped} swapped, {n_badloc} bad located', type='positive')
             
         except Exception as ex:
             ui.notify(f'Analysis failed: {ex}', type='negative')
@@ -469,14 +472,16 @@ class DashboardPage:
     
     def _goto_annotation(self):
         """Navigate to annotation page"""
-        app_state.annotation_queue = app_state.get_selected_issues()
+        # Get topK value and apply it when building annotation queue
+        top_k = int(self.topk_input.value) if self.topk_input.value else 10
+        app_state.annotation_queue = app_state.get_selected_issues(top_k=top_k)
         app_state.current_annotation_index = 0
         
         if not app_state.annotation_queue:
             ui.notify('No issues selected.', type='warning')
             return
         
-        ui.notify(f'Starting with {len(app_state.annotation_queue)} samples', type='info')
+        ui.notify(f'Starting with {len(app_state.annotation_queue)} samples (TopK={top_k})', type='info')
         ui.navigate.to('/annotator')
 
 

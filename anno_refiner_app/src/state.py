@@ -64,25 +64,33 @@ class AppState:
     annotation_queue: List[IssueItem] = field(default_factory=list)
     current_annotation_index: int = 0
     
-    def get_selected_issues(self) -> List[IssueItem]:
-        """Get merged list of selected issue types (deduplicated by image_path)"""
+    def get_selected_issues(self, top_k: int = None) -> List[IssueItem]:
+        """Get merged list of selected issue types (deduplicated by image_path)
+        
+        Args:
+            top_k: If provided, only take top_k items from each selected issue type before merging
+        """
         seen_paths = set()
         merged = []
         
+        # Get items from each category, applying top_k limit if specified
         if self.selected_overlooked:
-            for item in self.results.overlooked:
+            items = self.results.overlooked[:top_k] if top_k else self.results.overlooked
+            for item in items:
                 if item.image_path not in seen_paths:
                     seen_paths.add(item.image_path)
                     merged.append(item)
         
         if self.selected_swapped:
-            for item in self.results.swapped:
+            items = self.results.swapped[:top_k] if top_k else self.results.swapped
+            for item in items:
                 if item.image_path not in seen_paths:
                     seen_paths.add(item.image_path)
                     merged.append(item)
         
         if self.selected_bad_located:
-            for item in self.results.bad_located:
+            items = self.results.bad_located[:top_k] if top_k else self.results.bad_located
+            for item in items:
                 if item.image_path not in seen_paths:
                     seen_paths.add(item.image_path)
                     merged.append(item)
