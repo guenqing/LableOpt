@@ -1,6 +1,8 @@
 # Refiner 系统技术文档
 
 > 最后更新: 2026-01-16
+> 
+> 最新更新: 修复坐标换算问题，优化缩放与导航功能
 
 ## 系统功能与逻辑概述
 
@@ -452,6 +454,11 @@ def _on_back(self):
 │  [ / ]       上一张/下一张图片                         │
 │  Tab          循环选中 GT 框                             │
 │                                                          │
+│  缩放                                                    │
+│  = / +        放大一级                                   │
+│  -            缩小一级                                   │
+│  0            重置到 1x                                  │
+│                                                          │
 │  编辑                                                    │
 │  Del/Backspace  删除选中框                              │
 │  Arrow Keys    移动选中框 (1px, Shift=10px)             │
@@ -744,29 +751,52 @@ Pred boxes:  editable=True    (变为可编辑)
 
 ### 6. 缩放与平移实现
 
+#### 缩放级别与快捷键
+
 ```python
-# 缩放级别
+# 缩放级别: 1x 到 10x
 ZOOM_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
-# 缩放焦点定位 (修复 BUG-001)
-def zoom_to_box(self, box_id: str, target_zoom: float):
-    """缩放并居中到指定框"""
-    box = self._find_box(box_id)
-    if box:
-        # 计算框中心
-        center_x = box.x + box.w / 2
-        center_y = box.y + box.h / 2
-        
-        # 设置缩放
-        self.zoom = target_zoom
-        
-        # 调整平移，使框中心位于视图中心
-        view_center_x = self.fixed_width / 2
-        view_center_y = self.fixed_height / 2
-        
-        self.pan_x = center_x - (view_center_x / self.zoom)
-        self.pan_y = center_y - (view_center_y / self.zoom)
+# 快捷键
+# = / + : 放大一级
+# -     : 缩小一级
+# 0     : 重置到 1x
 ```
+
+#### 坐标系统
+
+系统使用统一的图像坐标系统：
+- `pan_x`, `pan_y`: 视野左上角在图像坐标系中的位置（像素）
+- 所有坐标转换基于图像尺寸和显示缩放比例 `scale_1x`
+- Viewer 和 Navigator 使用相同的坐标映射关系
+
+#### 缩放焦点定位
+
+```python
+def set_zoom(self, zoom: float, focus_point: tuple = None):
+    """设置缩放级别
+    
+    焦点优先级:
+    1. 如果选中了框，以框中心为焦点
+    2. 否则，以当前视野中心为焦点
+    """
+    # 计算焦点位置（图像坐标）
+    if focus_point is None:
+        focus_point = self._get_zoom_focus_point()
+    
+    # 设置缩放并调整 pan，使焦点保持在视野中心
+    self.zoom = new_zoom
+    visible_w = self.view_width / (self.zoom * scale_1x)
+    visible_h = self.view_height / (self.zoom * scale_1x)
+    self.pan_x = focus_x - visible_w / 2
+    self.pan_y = focus_y - visible_h / 2
+```
+
+#### Navigator (小地图)
+
+- **功能**: 点击 Navigator 任意位置，Viewer 快速定位到该位置
+- **实现**: 使用 `interactive_image` 组件，坐标直接映射到图像坐标
+- **特点**: 不显示视野框，简化交互，避免坐标换算问题
 
 ### 7. 性能优化技巧
 

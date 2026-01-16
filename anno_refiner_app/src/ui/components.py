@@ -160,14 +160,21 @@ class InteractiveAnnotator:
         """
         with container:
             ui.label('Navigator').classes('text-xs text-gray-500')
-            self.minimap_component = ui.interactive_image(
-                source='',
-                on_mouse=self._handle_minimap_mouse,
-                events=['mousedown', 'mouseup', 'mousemove'],
-                cross=False,
-                sanitize=False,
-            ).style(f'width: {self.minimap_width}px; height: {self.minimap_height}px; object-fit: contain;') \
-             .classes('border border-gray-300 rounded cursor-pointer')
+            # Use a fixed container, same approach as Viewer
+            # Fixed size container with overflow hidden
+            with ui.element('div').classes('relative flex-none') \
+                    .style(f'width: {self.minimap_width}px; height: {self.minimap_height}px; overflow: hidden; border: 1px solid #d1d5db; border-radius: 4px; cursor: pointer;') \
+                    as self.minimap_container:
+                # Inner container for the image (same structure as Viewer)
+                with ui.element('div').classes('inline-block') \
+                        .style('transform-origin: 0 0;') as self.minimap_transform_container:
+                    self.minimap_component = ui.interactive_image(
+                        source='',
+                        on_mouse=self._handle_minimap_mouse,
+                        events=['mousedown', 'mouseup', 'mousemove', 'click'],
+                        cross=False,
+                        sanitize=False,
+                    ).classes('block')
         
         # Load current image into minimap if already loaded
         if self.image_path:
@@ -306,6 +313,16 @@ class InteractiveAnnotator:
                 return False
         return False
     
+    def _zoom_to_box(self, box: BBox) -> None:
+        """Zoom to center on the specified box"""
+        # Calculate box center in image coordinates
+        box_center_x = box.x + box.w / 2
+        box_center_y = box.y + box.h / 2
+        
+        # Zoom to level 3x (or appropriate level)
+        target_zoom = 3.0
+        self.set_zoom(target_zoom, focus_point=(box_center_x, box_center_y))
+    
     # ==================== One-Click Actions ====================
     
     def swap_editable(self) -> None:
@@ -362,8 +379,9 @@ class InteractiveAnnotator:
         """
         if self.zoom <= 1.0:
             return (0, 0)
-        visible_width = self.view_width / self.zoom
-        visible_height = self.view_height / self.zoom
+        scale_1x = self._get_viewer_scale_1x()
+        visible_width = self.view_width / (self.zoom * scale_1x)
+        visible_height = self.view_height / (self.zoom * scale_1x)
         max_pan_x = max(0, self.image_width - visible_width)
         max_pan_y = max(0, self.image_height - visible_height)
         return (max_pan_x, max_pan_y)
@@ -441,11 +459,16 @@ class InteractiveAnnotator:
             self.pan_y = 0
         else:
             # Calculate new pan to keep focus point at the same screen position
-            # At old zoom: screen_center = (pan_x + view_width/(2*old_zoom), pan_y + view_height/(2*old_zoom))
-            # We want focus_point to remain at screen center after zoom change
-            # New pan: pan_x = focus_x - view_width/(2*new_zoom)
-            self.pan_x = focus_x - self.view_width / (2 * self.zoom)
-            self.pan_y = focus_y - self.view_height / (2 * self.zoom)
+            # At zoom>1, the visible area in image coordinates is:
+            #   width = view_width / (zoom * scale_1x)
+            #   height = view_height / (zoom * scale_1x)
+            # We want focus_point to be at the center of the visible area
+            scale_1x = self._get_viewer_scale_1x()
+            visible_w = self.view_width / (self.zoom * scale_1x)
+            visible_h = self.view_height / (self.zoom * scale_1x)
+            
+            self.pan_x = focus_x - visible_w / 2
+            self.pan_y = focus_y - visible_h / 2
         
         self._constrain_pan()
         self._apply_transform()
@@ -473,14 +496,42 @@ class InteractiveAnnotator:
             return (cx, cy)
         
         # No selection - focus on current view center
+        # Calculate the center of the currently visible area in image coordinates
+        scale_1x = self._get_viewer_scale_1x()
+        
         if self.zoom > 1.0:
-            # View center in image coordinates
-            cx = self.pan_x + self.view_width / (2 * self.zoom)
-            cy = self.pan_y + self.view_height / (2 * self.zoom)
+            # View center in image coordinates when zoomed
+            visible_w = self.view_width / (self.zoom * scale_1x)
+            visible_h = self.view_height / (self.zoom * scale_1x)
+            cx = self.pan_x + visible_w / 2
+            cy = self.pan_y + visible_h / 2
         else:
-            # At 1x zoom, center of image (or view if image is smaller)
-            cx = min(self.image_width, self.view_width) / 2
-            cy = min(self.image_height, self.view_height) / 2
+            # At 1x zoom, calculate the center of the visible area
+            # The image is displayed with scale_1x, and may be centered in the viewer
+            # We need to find what part of the image is visible at the center of the viewer
+            # Viewer center in display coordinates: (view_width/2, view_height/2)
+            # Convert to image coordinates
+            display_width_1x = self.image_width * scale_1x
+            display_height_1x = self.image_height * scale_1x
+            display_x_1x = (self.view_width - display_width_1x) / 2
+            display_y_1x = (self.view_height - display_height_1x) / 2
+            
+            # Viewer center in display coordinates
+            viewer_center_x_display = self.view_width / 2
+            viewer_center_y_display = self.view_height / 2
+            
+            # Convert viewer center from display coordinates to image coordinates
+            # First, subtract the display offset to get position relative to scaled image
+            relative_x = viewer_center_x_display - display_x_1x
+            relative_y = viewer_center_y_display - display_y_1x
+            
+            # Then convert from scaled display coordinates to image coordinates
+            cx = relative_x / scale_1x
+            cy = relative_y / scale_1x
+            
+            # Clamp to image bounds
+            cx = max(0, min(cx, self.image_width))
+            cy = max(0, min(cy, self.image_height))
         
         return (cx, cy)
     
@@ -507,124 +558,151 @@ class InteractiveAnnotator:
         """Zoom out by 1 level"""
         self.set_zoom(self.zoom - 1)
     
+    def _get_viewer_scale_1x(self) -> float:
+        """Get the scale factor at 1x zoom (when image fits in viewer with aspect ratio preserved)
+        
+        Returns:
+            scale factor (display_width / image_width, should equal display_height / image_height)
+        """
+        if self.image_width <= 0 or self.image_height <= 0:
+            return 1.0
+        
+        scale_x = self.view_width / self.image_width
+        scale_y = self.view_height / self.image_height
+        return min(scale_x, scale_y)  # Use smaller scale to fit both dimensions
+    
     def _apply_transform(self) -> None:
-        """Apply CSS transform for zoom and pan"""
+        """Apply CSS transform for zoom and pan
+        
+        The key insight: pan_x and pan_y are in IMAGE coordinates (not display coordinates).
+        pan_x and pan_y represent the top-left corner of the visible viewport in image coordinates.
+        At 1x zoom, the image is displayed with scale_1x to fit the container.
+        At zoom>1, we scale by zoom, and translate to show the region starting from (pan_x, pan_y).
+        
+        CSS transforms are applied right-to-left, so:
+        transform: translate(x, y) scale(z) means: first scale, then translate
+        
+        Strategy:
+        1. Scale the image by zoom (in 1x display space, image becomes image_width*zoom*scale_1x x image_height*zoom*scale_1x)
+        2. Translate so that point (pan_x, pan_y) in image coordinates aligns with the viewer's top-left corner
+           (accounting for the 1x display offset)
+        """
         if not hasattr(self, 'transform_container') or not self.transform_container:
             return
         
-        # Use translate then scale (CSS applies right-to-left)
-        # We want: first translate by -pan, then scale
-        # In CSS: transform: scale(z) translate(-px, -py)
-        # This means: scale first, then translate (in scaled space)
-        # Actually we need: translate(-pan*zoom, -pan*zoom) scale(zoom)
-        # Which gives us the effect of panning in image space then scaling
-        
-        # Simpler approach: translate in unscaled space, then scale
-        translate_x = -self.pan_x * self.zoom
-        translate_y = -self.pan_y * self.zoom
-        
-        transform = f'translate({translate_x}px, {translate_y}px) scale({self.zoom})'
-        self.transform_container.style(f'transform: {transform}; transform-origin: 0 0;')
+        if self.zoom <= 1.0:
+            # At 1x zoom, no transform needed
+            self.transform_container.style('transform: none;')
+        else:
+            # Get scale at 1x zoom
+            scale_1x = self._get_viewer_scale_1x()
+            
+            # Calculate display offset at 1x (for centering when aspect ratio differs)
+            display_width_1x = self.image_width * scale_1x
+            display_height_1x = self.image_height * scale_1x
+            display_x_1x = (self.view_width - display_width_1x) / 2
+            display_y_1x = (self.view_height - display_height_1x) / 2
+            
+            # CSS applies transforms right-to-left, so we write: translate then scale
+            # This means: first scale, then translate
+            # We want: point (pan_x, pan_y) in image coordinates to be at the top-left of the visible area
+            # In 1x display space: (pan_x*scale_1x, pan_y*scale_1x)
+            # After zoom scale: (pan_x*scale_1x*zoom, pan_y*scale_1x*zoom)
+            # We want this point to be at viewer top-left (accounting for 1x offset): (display_x_1x, display_y_1x)
+            # So translate by: (display_x_1x - pan_x*scale_1x*zoom, display_y_1x - pan_y*scale_1x*zoom)
+            translate_x = display_x_1x - self.pan_x * scale_1x * self.zoom
+            translate_y = display_y_1x - self.pan_y * scale_1x * self.zoom
+            
+            transform = f'translate({translate_x}px, {translate_y}px) scale({self.zoom})'
+            self.transform_container.style(f'transform: {transform}; transform-origin: 0 0;')
         
         # Update minimap viewport indicator
         self._update_minimap()
     
+    def _get_minimap_display_info(self) -> Tuple[float, float, float, float]:
+        """Calculate the actual displayed image area in Navigator container
+        
+        Navigator uses the same approach as Viewer: fixed container, image scales naturally
+        to fill the longer dimension, with padding on the shorter dimension.
+        
+        Returns:
+            (display_x, display_y, display_width, display_height) - position and size of displayed image
+            in Navigator container coordinates (pixels)
+        """
+        if self.image_width <= 0 or self.image_height <= 0:
+            return (0, 0, self.minimap_width, self.minimap_height)
+        
+        # Calculate scale to fit image in container while maintaining aspect ratio
+        # Same logic as Viewer: scale so that the longer dimension fills the container
+        scale_x = self.minimap_width / self.image_width
+        scale_y = self.minimap_height / self.image_height
+        scale = min(scale_x, scale_y)  # Use smaller scale to fit both dimensions
+        
+        # Calculate actual displayed size (same as Viewer)
+        display_width = self.image_width * scale
+        display_height = self.image_height * scale
+        
+        # Center the image in the container (same as Viewer)
+        display_x = (self.minimap_width - display_width) / 2
+        display_y = (self.minimap_height - display_height) / 2
+        
+        return (display_x, display_y, display_width, display_height)
+    
     def _update_minimap(self) -> None:
-        """Update minimap with viewport indicator rectangle"""
+        """Update minimap (no viewport indicator - removed for simplicity)"""
         if not hasattr(self, 'minimap_component') or not self.minimap_component:
             return
-        if self.image_width <= 0 or self.image_height <= 0:
-            return
-        
-        # The minimap shows the FULL IMAGE, but scaled down to fit minimap_width x minimap_height
-        # The main view shows only a portion of the image (view_width x view_height at zoom=1x)
-        # 
-        # We need to calculate the scale factor between image coords and minimap display coords
-        # Minimap displays the full image, so:
-        #   minimap_scale_x = minimap_width / image_width
-        #   minimap_scale_y = minimap_height / image_height
-        # But since we use object-fit: contain, the actual scale is the min of these
-        
-        # For simplicity, let's calculate based on the image aspect ratio
-        img_aspect = self.image_width / self.image_height
-        minimap_aspect = self.minimap_width / self.minimap_height
-        
-        if img_aspect > minimap_aspect:
-            # Image is wider - width is the constraint
-            minimap_img_scale = self.minimap_width / self.image_width
-        else:
-            # Image is taller - height is the constraint
-            minimap_img_scale = self.minimap_height / self.image_height
-        
-        # The viewport in the main view (in image coordinates):
-        # Position: (pan_x, pan_y), Size: (view_width/zoom, view_height/zoom)
-        viewport_x = self.pan_x
-        viewport_y = self.pan_y
-        viewport_w = self.view_width / self.zoom
-        viewport_h = self.view_height / self.zoom
-        
-        # Convert to minimap coordinates
-        rect_x = viewport_x * minimap_img_scale
-        rect_y = viewport_y * minimap_img_scale
-        rect_w = viewport_w * minimap_img_scale
-        rect_h = viewport_h * minimap_img_scale
-        
-        # #region agent log
-        import json; open('/home/yangxinyu/Test/Projects/refiner/.cursor/debug.log', 'a').write(json.dumps({"location": "components.py:_update_minimap", "message": "minimap_update", "data": {"image_size": [self.image_width, self.image_height], "minimap_size": [self.minimap_width, self.minimap_height], "minimap_img_scale": minimap_img_scale, "viewport_img": [viewport_x, viewport_y, viewport_w, viewport_h], "rect_minimap": [rect_x, rect_y, rect_w, rect_h], "zoom": self.zoom}, "timestamp": __import__('time').time()*1000, "sessionId": "debug-session", "hypothesisId": "G"}) + '\n')
-        # #endregion
-        
-        # Only show viewport rect when zoomed in
-        if self.zoom > 1.0:
-            svg_content = f'''
-                <rect x="{rect_x}" y="{rect_y}" width="{rect_w}" height="{rect_h}"
-                      fill="rgba(59, 130, 246, 0.2)" stroke="#3b82f6" stroke-width="2"
-                      pointer-events="all" cursor="move" />
-            '''
-        else:
-            svg_content = ''
-        
-        self.minimap_component.set_content(svg_content)
+        # No overlay needed - Navigator is used only for click-to-navigate
+        self.minimap_component.set_content('')
     
     def _handle_minimap_mouse(self, e) -> None:
-        """Handle mouse events on minimap"""
-        event_type = e.type
+        """Handle mouse events on minimap image
         
-        # Get click position in minimap coordinates (these are image coords scaled down)
-        x = e.image_x if hasattr(e, 'image_x') else 0
-        y = e.image_y if hasattr(e, 'image_y') else 0
+        Note: interactive_image returns coordinates relative to the ORIGINAL image size,
+        not the displayed size. With object-fit: contain, we need to account for the
+        actual displayed area and scale.
+        """
+        if not hasattr(e, 'image_x') or not hasattr(e, 'image_y'):
+            return
         
-        if event_type == 'mousedown':
-            self.minimap_dragging = True
-            # Center the viewport on click position
-            self._minimap_set_center(x, y)
+        # interactive_image gives us coordinates in the original image coordinate system
+        # These coordinates are already in image pixel coordinates, which is what we need
+        image_x = e.image_x
+        image_y = e.image_y
+        
+        # Clamp to image bounds (interactive_image should already do this, but be safe)
+        image_x = max(0, min(image_x, self.image_width))
+        image_y = max(0, min(image_y, self.image_height))
+        
+        event_type = e.type if hasattr(e, 'type') else 'unknown'
+        
+        if event_type == 'click' or event_type == 'mousedown':
+            self.minimap_dragging = (event_type == 'mousedown')
+            # When clicking on minimap, center the viewport on the clicked point
+            self._minimap_set_center(image_x, image_y)
         elif event_type == 'mousemove' and self.minimap_dragging:
-            self._minimap_set_center(x, y)
+            # When dragging, update the viewport center
+            self._minimap_set_center(image_x, image_y)
         elif event_type == 'mouseup':
             self.minimap_dragging = False
     
-    def _minimap_set_center(self, minimap_x: float, minimap_y: float) -> None:
-        """Set the main view pan so that the viewport is centered at the given minimap position
+    
+    def _minimap_set_center(self, image_x: float, image_y: float) -> None:
+        """Set the main view pan so that the viewport is centered at the given image position
         
         Args:
-            minimap_x, minimap_y: Coordinates from interactive_image mouse event (in original image coords)
+            image_x, image_y: Coordinates in image coordinate system
         """
         if self.zoom <= 1.0:
             return
         
-        # The minimap's interactive_image returns coordinates in the ORIGINAL IMAGE coordinate system
-        # (this is how ui.interactive_image works - it returns image coords regardless of display size)
-        # So minimap_x, minimap_y are already in image coordinates!
+        # Set pan so that (image_x, image_y) is at the center of the viewport
+        scale_1x = self._get_viewer_scale_1x()
+        visible_w = self.view_width / (self.zoom * scale_1x)
+        visible_h = self.view_height / (self.zoom * scale_1x)
         
-        # Set pan so that (minimap_x, minimap_y) is at the center of the viewport
-        visible_w = self.view_width / self.zoom
-        visible_h = self.view_height / self.zoom
-        
-        self.pan_x = minimap_x - visible_w / 2
-        self.pan_y = minimap_y - visible_h / 2
-        
-        # #region agent log
-        import json; open('/home/yangxinyu/Test/Projects/refiner/.cursor/debug.log', 'a').write(json.dumps({"location": "components.py:_minimap_set_center", "message": "minimap_click", "data": {"click_img_coords": [minimap_x, minimap_y], "visible_size": [visible_w, visible_h], "new_pan": [self.pan_x, self.pan_y]}, "timestamp": __import__('time').time()*1000, "sessionId": "debug-session", "hypothesisId": "G"}) + '\n')
-        # #endregion
+        self.pan_x = image_x - visible_w / 2
+        self.pan_y = image_y - visible_h / 2
         
         self._constrain_pan()
         self._apply_transform()
@@ -638,10 +716,11 @@ class InteractiveAnnotator:
             return
         
         # Pan is in image coordinates
-        # At zoom Z, visible area in image coords is (view_width/Z, view_height/Z)
+        # At zoom Z with scale_1x, visible area in image coords is (view_width/(Z*scale_1x), view_height/(Z*scale_1x))
         # Maximum pan is image_size - visible_area
-        visible_width = self.view_width / self.zoom
-        visible_height = self.view_height / self.zoom
+        scale_1x = self._get_viewer_scale_1x()
+        visible_width = self.view_width / (self.zoom * scale_1x)
+        visible_height = self.view_height / (self.zoom * scale_1x)
         
         max_pan_x = max(0, self.image_width - visible_width)
         max_pan_y = max(0, self.image_height - visible_height)
@@ -1121,6 +1200,21 @@ class InteractiveAnnotator:
         if (key_name.lower() == 'y' and e.modifiers.ctrl) or (key_name.lower() == 'z' and e.modifiers.ctrl and e.modifiers.shift):
             self.redo()
             return
+        
+        # Zoom shortcuts (global, work regardless of selection)
+        if not e.modifiers.ctrl and not e.modifiers.alt:
+            # = or + for zoom in
+            if key_name == 'Equal' or key_name == '=' or key_name == '+':
+                self.zoom_in()
+                return
+            # - for zoom out
+            if key_name == 'Minus' or key_name == '-':
+                self.zoom_out()
+                return
+            # 0 for reset zoom
+            if key_name == '0' or key_name == 'Digit0':
+                self.reset_zoom()
+                return
         
         # Tab - cycle selection
         if e.key.tab if hasattr(e.key, 'tab') else key_name == 'Tab':

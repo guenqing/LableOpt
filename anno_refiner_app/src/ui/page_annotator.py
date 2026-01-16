@@ -341,6 +341,8 @@ class AnnotatorPage:
                         ui.label('Arrow keys - Move box')
                         ui.label('q/w/e/r - Set class 0/1/2/3')
                         ui.label('Ctrl+Z/Y - Undo/Redo')
+                        ui.label('= / - - Zoom in/out')
+                        ui.label('0 - Reset zoom')
     
     def _load_current_image(self):
         """Load the current image from the queue"""
