@@ -1,531 +1,873 @@
-# Refiner 系统开发状态追踪
+# Refiner 系统技术文档
 
 > 最后更新: 2026-01-16
 
-## 项目概述
+## 系统功能与逻辑概述
 
-Refiner 是一个面向 YOLO 目标检测标签修正工作的 Web UI 工具，基于 Cleanlab 自动定位可能有误的标注样本，支持人工审核和修正。
+Refiner 是一个基于 Cleanlab 的 YOLO 目标检测标签修正工具，通过 Web UI 自动定位可能有误的标注样本，支持人工审核和修正。
 
-### 解决的三类标签问题
+### 核心工作流程
 
-| 问题类型 | 说明 | 检测原理 |
-|---------|------|---------|
-| **Overlooked（漏标）** | GT 中遗漏了应标注的目标 | 模型高置信度预测了框，但 GT 无对应标注 |
-| **Swapped（类别错误）** | GT 中目标的类别标注错误 | GT 框类别与模型预测类别不一致 |
-| **Bad Located（框不准）** | GT 中边界框位置/尺寸偏差大 | GT 框与模型预测框的 IoU 较低 |
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Refiner 工作流程                            │
+└─────────────────────────────────────────────────────────────────┘
 
----
+1. 数据准备阶段
+   ┌──────────────┐
+   │ 输入路径配置 │ → 验证路径有效性 → 收集图片和标签文件
+   └──────────────┘
 
-## 开发阶段状态
+2. Cleanlab 分析阶段
+   ┌─────────────────────────────────────────────┐
+   │ 格式转换 (YOLO → Cleanlab)                  │
+   │  ├─ GT 标签转换                              │
+   │  ├─ Pred 标签转换                            │
+   │  └─ 类别统计                                 │
+   │                                             │
+   │ 问题检测 (三种类型)                          │
+   │  ├─ Overlooked: 模型预测但 GT 未标注         │
+   │  ├─ Swapped: GT 类别与预测类别不一致         │
+   │  └─ Bad Located: GT 框与预测框 IoU 低        │
+   │                                             │
+   │ 分数排序 → TopK 筛选                        │
+   └─────────────────────────────────────────────┘
 
-| 阶段 | 内容 | 状态 | 完成日期 |
-|-----|------|------|---------|
-| 阶段一 | 环境搭建与基础验证 | 已完成 | 2026-01-15 |
-| 阶段二 | 核心工具模块 (yolo_utils, file_manager) | 已完成 | 2026-01-15 |
-| 阶段三 | Cleanlab 分析器 | 已完成 | 2026-01-15 |
-| 阶段四 | 页面A - Dashboard | 已完成 | 2026-01-15 |
-| 阶段五 | 标注组件开发 | 已完成 | 2026-01-15 |
-| 阶段六 | 页面B - Annotator | 已完成 | 2026-01-15 |
-| 阶段七 | 集成测试与优化 | 已完成 | 2026-01-16 |
-| 阶段八 | 性能优化 | 已完成 | 2026-01-16 |
+3. 可视化与筛选阶段 (Dashboard)
+   ┌─────────────────────────────────────────────┐
+   │ 问题列表展示 (三列)                         │
+   │  ├─ Overlooked (橙色)                       │
+   │  ├─ Swapped (红色)                          │
+   │  └─ Bad Located (紫色)                       │
+   │                                             │
+   │ 点击问题项 → 即时可视化                      │
+   │  ├─ GT 框 (绿色实线)                        │
+   │  ├─ Pred 框 (蓝色虚线)                      │
+   │  └─ 问题框 (红色高亮)                       │
+   │                                             │
+   │ 选择问题类型 → 构建标注队列                  │
+   └─────────────────────────────────────────────┘
 
----
+4. 标注修正阶段 (Annotator)
+   ┌─────────────────────────────────────────────┐
+   │ 交互式标注编辑                               │
+   │  ├─ 鼠标操作: 拖拽移动/调整大小/创建框       │
+   │  ├─ 键盘快捷键: 类别修改/微调/导航          │
+   │  └─ 一键操作: 交换可编辑状态/清除/激活        │
+   │                                             │
+   │ 保存机制                                     │
+   │  ├─ 临时文件: {stem}_tmp.txt                │
+   │  ├─ 自动保存: 切换图片时自动保存             │
+   │  └─ 确认保存: 返回时确认覆盖或丢弃           │
+   └─────────────────────────────────────────────┘
+```
 
-## 已完成功能详情
+### 三类标签问题检测原理
 
-### 阶段一：环境搭建与基础验证
-
-- [x] 创建项目目录结构 `anno_refiner_app/`
-- [x] 验证 NiceGUI 导入正常
-- [x] 验证 Cleanlab object_detection 模块导入正常
-- [x] 创建数据模型 `models.py`
-
-### 阶段二：核心工具模块
-
-#### `src/core/yolo_utils.py`
-
-- [x] `yolo_to_pixel()` / `pixel_to_yolo()`: YOLO 归一化坐标与像素坐标互转
-- [x] `read_yolo_label()`: 读取 YOLO 标签文件（支持 GT 和 Pred 格式）
-- [x] `write_yolo_label()`: 写入 YOLO 标签文件
-- [x] `collect_image_paths()`: 递归收集嵌套目录结构中的图片路径
-- [x] `prepare_cleanlab_labels()`: 将 GT 标签转换为 Cleanlab 格式（支持自动并行/串行切换）
-- [x] `prepare_cleanlab_predictions()`: 将预测标签转换为 Cleanlab 格式（支持自动并行/串行切换）
-- [x] `count_classes()`: 统计类别数量（支持自动并行/串行切换）
-
-#### `src/core/file_manager.py`
-
-- [x] `backup_folder()`: 文件夹备份（支持时间戳后缀）
-- [x] `save_tmp_annotation()`: 保存临时标注文件
-- [x] `confirm_changes()`: 确认或放弃标注更改
-- [x] `get_tmp_files()`: 获取所有临时文件列表
-- [x] `validate_paths()`: 验证输入路径并返回统计信息
-
-### 阶段三：Cleanlab 分析器
-
-#### `src/core/analyzer.py`
-
-- [x] `CleanlabAnalyzer` 类实现
-- [x] `prepare_data()`: 加载数据并转换为 Cleanlab 格式
-- [x] `analyze(top_k)`: 执行分析并返回 TopK 问题样本
-- [x] `get_label_quality_scores()`: 获取所有图片的整体质量分数
-- [x] 支持嵌套目录结构 `{category}/{video}/frame_xxxxx.jpg`
-- [x] 进度回调支持
-- [x] NaN 值过滤（完美匹配的框不报告为问题）
-- [x] 使用 `auxiliary_inputs` 优化分析阶段性能（减少重复计算）
-
-### 阶段四：页面A - Dashboard
-
-#### `src/state.py`
-
-- [x] `AppState` 全局状态管理类
-- [x] `AnalysisResults` 分析结果存储
-- [x] `get_selected_issues()`: 合并选中类型的问题（去重）
-
-#### `src/ui/page_dashboard.py`
-
-- [x] 路径输入与实时验证（显示文件数量）
-- [x] Cleanlab 分析触发与进度条显示
-- [x] 三列问题列表展示（固定高度，可滚动）
-- [x] TopK 配置与刷新按钮
-- [x] 问题类型勾选（Overlooked/Swapped/Bad Located）
-- [x] **点击即时可视化**：点击列表项生成临时可视化图片
-- [x] 可视化面板：显示 GT 框（绿色）、Pred 框（蓝色虚线）、问题框（红色高亮）
-- [x] 备份选项（默认关闭）
-- [x] "Go to Annotation Tool" 跳转按钮
-
-#### `main.py`
-
-- [x] NiceGUI 应用入口
-- [x] 路由配置（`/` Dashboard, `/annotator` 占位）
-- [x] 命令行参数支持（--host, --port）
-
-### 阶段五：标注组件开发
-
-#### `TEST_stage_5/interactive_annotator.py`
-
-核心交互式标注组件 `InteractiveAnnotator`，基于 NiceGUI `ui.interactive_image` 实现：
-
-**基础功能**：
-- [x] 图片加载与显示
-- [x] GT 框渲染（绿色实线）
-- [x] Pred 框渲染（蓝色虚线）
-- [x] 选中框高亮（红色，显示 8 个控制点）
-
-**鼠标交互**：
-- [x] 点击选中框
-- [x] 拖拽移动框
-- [x] 拖拽控制点调整大小（4 角 + 4 边）
-- [x] 空白区域拖拽创建新框
-
-**键盘快捷键**：
-- [x] `Tab`: 循环选中 GT 框
-- [x] `Delete/Backspace`: 删除选中框
-- [x] `Arrow Keys`: 移动选中框（1px，Shift=10px）
-- [x] `q/w/e/r`: 修改类别为 0/1/2/3
-- [x] `a/s/d/f`: 边框向外扩展（Shift 反向）
-- [x] `z/x/c/v`: 角向外扩展（Shift 反向）
-- [x] `Ctrl+Z`: 撤销
-- [x] `Ctrl+Y`: 重做
-
-**缩放与平移**：
-- [x] 缩放级别 1x-10x
-- [x] 滚动条快速平移
-- [ ] ~~拖拽平移~~（已禁用，有坐标计算问题）
-- [ ] 缩放焦点定位（BUG-001：选中框后缩放不能正确居中）
-
-**约束与历史**：
-- [x] 框约束在图片边界内
-- [x] 最小框尺寸 5x5 像素
-- [x] 撤销/重做历史栈（最多 50 步）
-
-#### `TEST_stage_5/test_annotator.py`
-
-独立测试页面，用于验证组件功能：
-- 随机加载 10 张测试图片
-- 完整的控制面板（显示选项、类别选择、缩放控制）
-- 快捷键参考提示
-
-### 阶段六：页面B - Annotator
-
-#### `src/ui/components.py`
-
-从 `TEST_stage_5/interactive_annotator.py` 复制并适配导入路径：
-- [x] InteractiveAnnotator 组件完整集成
-- [x] 修改导入为相对路径 (`from ..models import BBox, BoxSource`)
-
-#### `src/ui/page_annotator.py`
-
-Annotator 页面实现 `AnnotatorPage` 类：
-
-**标题栏**：
-- [x] 图片路径显示
-- [x] 进度显示 `(15/47)`
-- [x] 问题类型与分数显示
-
-**标注区域**：
-- [x] InteractiveAnnotator 组件集成（900x600 固定尺寸）
-- [x] 导航按钮 `[<- Prev]` / `[Next ->]`
-
-**缩略图**：
-- [x] Navigator 缩略图区域，显示当前图片的缩略图以及视野框（蓝色半透明框）
-- [x] 缩略图区域点击可以跳转到标注区域相应位置
-- [x] 缩略图区域拖动可以移动标注区域视野框
-
-**控制面板**：
-- [x] Display Options（Show GT / Show Pred 复选框）
-- [x] Zoom Controls（缩放倍数、+/-按钮、滑动条、重置）
-- [x] Current Class（下拉选择 0/1/2/3）
-- [x] Save Controls（Auto Save 复选框、Save 按钮）
-- [x] Go Back to Analysis 按钮
-- [x] 键盘快捷键提示展开面板
-
-**导航功能**：
-- [x] `[` / `]` 键：上一张/下一张图片
-- [x] 边界处理（第一张禁用 Prev，最后一张禁用 Next）
-
-**保存逻辑**：
-- [x] 手动保存：保存到 `{stem}_tmp.txt`
-- [x] Auto Save：切换图片时自动保存
-- [x] 加载时优先读取 tmp 文件
-
-**返回确认流程**：
-- [x] 检测 tmp 文件存在性
-- [x] 确认对话框（Yes-Keep / No-Discard / Cancel）
-- [x] Yes：覆盖原文件
-- [x] No：删除 tmp 文件
-- [x] Cancel：停留在当前页面
-- [x] 无修改时直接返回
-
-#### `main.py`
-
-- [x] 更新 `/annotator` 路由指向 `page_annotator.create_annotator()`
+| 问题类型 | 检测原理 | 代码位置 |
+|---------|---------|---------|
+| **Overlooked（漏标）** | 模型高置信度预测了框，但 GT 无对应标注 | `analyzer.py:165-182` |
+| **Swapped（类别错误）** | GT 框类别与模型预测类别不一致 | `analyzer.py:186-203` |
+| **Bad Located（框不准）** | GT 框与模型预测框的 IoU 较低 | `analyzer.py:207-224` |
 
 ---
 
-## 项目结构
+## 系统架构
+
+### 项目结构
 
 ```
 refiner/
-├── DOC/
-│   └── refiner_implementation_status.md    # 本文档
 ├── anno_refiner_app/
-│   ├── __init__.py
-│   ├── main.py                             # 应用入口
+│   ├── main.py                    # 应用入口，路由配置
 │   └── src/
-│       ├── __init__.py
-│       ├── models.py                       # 数据模型定义
-│       ├── state.py                        # 全局状态管理
+│       ├── models.py              # 数据模型 (BBox, IssueItem, etc.)
+│       ├── state.py               # 全局状态管理 (AppState)
 │       ├── core/
-│       │   ├── __init__.py
-│       │   ├── yolo_utils.py               # YOLO 格式转换工具
-│       │   ├── file_manager.py             # 文件备份/临时文件管理
-│       │   └── analyzer.py                 # Cleanlab 分析器
+│       │   ├── yolo_utils.py      # YOLO 格式转换工具
+│       │   ├── file_manager.py   # 文件备份/临时文件管理
+│       │   └── analyzer.py        # Cleanlab 分析器
 │       └── ui/
-│           ├── __init__.py
-│           ├── components.py               # InteractiveAnnotator 组件
-│           ├── page_dashboard.py           # Dashboard 页面 (Page A)
-│           └── page_annotator.py           # Annotator 页面 (Page B)
-├── TEST_stage_1_to_3/
-│   ├── test_yolo_utils.py                  # yolo_utils 单元测试
-│   ├── test_file_manager.py                # file_manager 单元测试
-│   ├── test_analyzer.py                    # analyzer 集成测试
-│   ├── test_full_workflow.py               # 完整工作流测试
-│   ├── visualizations/                     # 问题样本可视化输出
-│   └── DOC/
-│       └── stage_1_to_3_summary.md         # 阶段1-3技术文档
-├── TEST_stage_5/
-│   ├── interactive_annotator.py            # InteractiveAnnotator 组件（源）
-│   ├── test_annotator.py                   # 测试页面入口
-│   ├── test_unit.py                        # 单元测试
-│   └── DOC/
-│       └── stage_5_summary.md              # 阶段5技术文档
-├── TEST_page_b_annotator/
-│   ├── test_annotator_page.py              # 页面B单元测试
-│   ├── test_integration.py                 # 集成测试
-│   └── DOC/
-│       └── page_b_summary.md               # 阶段6技术文档
-├── TEST_stage_7/                           # 阶段7测试
-│   ├── test_models.py                      # BBox 模型测试
-│   ├── test_annotator_logic.py             # 一键操作逻辑测试
-│   └── test_e2e_runner.py                  # 端到端测试运行器
-└── 需求与规划_v1.md                         # 需求规格文档
+│           ├── components.py      # InteractiveAnnotator 组件
+│           ├── page_dashboard.py  # Dashboard 页面
+│           └── page_annotator.py  # Annotator 页面
+└── DOC/
+    └── refiner_implementation_status.md
 ```
 
+### 技术栈
+
+- **前端框架**: NiceGUI (Python Web UI)
+- **问题检测**: Cleanlab object_detection
+- **数据处理**: NumPy, PIL
+- **并行处理**: ProcessPoolExecutor (自动切换串行/并行)
+
 ---
 
-## 启动方式
+## 核心模块详解
 
-```bash
-cd anno_refiner_app
-python main.py --port 8088
+### 1. 数据模型 (`src/models.py`)
+
+系统定义了三个核心数据模型：
+
+```python
+@dataclass
+class BBox:
+    """UI 层边界框"""
+    x: float                    # 左上角 x (像素)
+    y: float                    # 左上角 y (像素)
+    w: float                    # 宽度 (像素)
+    h: float                    # 高度 (像素)
+    class_id: int               # 类别 ID
+    source: BoxSource           # 来源 (GT/PRED)
+    id: str                     # 唯一标识符
+    selected: bool = False      # 是否选中
+    visible: bool = True        # 是否可见
+    editable: bool = True       # 是否可编辑
+
+@dataclass
+class IssueItem:
+    """问题样本"""
+    image_path: str             # 相对路径
+    issue_type: IssueType       # 问题类型
+    score: float                # 严重程度分数 (越低越严重)
+    box_index: Optional[int]    # 问题框索引
 ```
 
-然后在浏览器访问 `http://localhost:8088`（或通过端口转发访问）。
+**设计要点**:
+- `editable` 字段支持 GT/Pred 角色互换，实现灵活的数据整合
+- `visible` 字段支持单框显示/隐藏控制
+- `source` 枚举区分 GT 和 Pred 框的来源
+
+### 2. YOLO 格式转换 (`src/core/yolo_utils.py`)
+
+#### 坐标转换
+
+```python
+def yolo_to_pixel(cx: float, cy: float, w: float, h: float,
+                  img_w: int, img_h: int) -> Tuple[float, float, float, float]:
+    """YOLO 归一化坐标 → 像素坐标 (x1, y1, x2, y2)"""
+    box_w = w * img_w
+    box_h = h * img_h
+    x1 = (cx * img_w) - (box_w / 2)
+    y1 = (cy * img_h) - (box_h / 2)
+    x2 = x1 + box_w
+    y2 = y1 + box_h
+    return x1, y1, x2, y2
+
+def pixel_to_yolo(x1: float, y1: float, x2: float, y2: float,
+                  img_w: int, img_h: int) -> Tuple[float, float, float, float]:
+    """像素坐标 (x1, y1, x2, y2) → YOLO 归一化坐标"""
+    cx = ((x1 + x2) / 2) / img_w
+    cy = ((y1 + y2) / 2) / img_h
+    w = (x2 - x1) / img_w
+    h = (y2 - y1) / img_h
+    return cx, cy, w, h
+```
+
+#### 并行处理策略
+
+系统根据样本数量自动选择串行或并行处理：
+
+```python
+PARALLEL_THRESHOLD = 10000  # 阈值: 10k 样本
+
+def prepare_cleanlab_labels(...):
+    num_samples = len(image_rel_paths)
+    
+    if num_samples >= PARALLEL_THRESHOLD:
+        # 并行处理 (ProcessPoolExecutor)
+        num_workers = min(multiprocessing.cpu_count(), 32)
+        chunksize = max(1, len(args_list) // (num_workers * 4))
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            results = list(executor.map(worker, args_list, chunksize=chunksize))
+    else:
+        # 串行处理 (小数据集)
+        for rel_path in image_rel_paths:
+            # 处理单个样本
+```
+
+**性能优化**:
+- 小样本 (<10k): 串行处理，避免进程创建开销
+- 大样本 (≥10k): 并行处理，最多 32 进程
+- 预期加速: 100 万样本时 3-6x 加速
+
+### 3. Cleanlab 分析器 (`src/core/analyzer.py`)
+
+#### 分析流程
+
+```python
+class CleanlabAnalyzer:
+    def prepare_data(self):
+        """准备数据: 格式转换"""
+        # 1. 收集图片路径
+        all_image_rel_paths = collect_image_paths(self.images_path)
+        
+        # 2. 转换 GT 标签
+        self.labels, self.image_paths = prepare_cleanlab_labels(...)
+        
+        # 3. 统计类别数
+        self.num_classes = count_classes(...)
+        
+        # 4. 转换 Pred 标签
+        self.predictions = prepare_cleanlab_predictions(...)
+    
+    def analyze(self, top_k: int = 10):
+        """执行分析并返回 TopK 问题样本"""
+        # 1. 预计算辅助输入 (避免重复计算)
+        auxiliary_inputs = _get_valid_inputs_for_compute_scores(
+            alpha=ALPHA,
+            labels=self.labels,
+            predictions=self.predictions
+        )
+        
+        # 2. 计算三种问题分数
+        overlooked_scores = compute_overlooked_box_scores(
+            auxiliary_inputs=auxiliary_inputs
+        )
+        swap_scores = compute_swap_box_scores(auxiliary_inputs=auxiliary_inputs)
+        badloc_scores = compute_badloc_box_scores(auxiliary_inputs=auxiliary_inputs)
+        
+        # 3. 过滤 NaN 值并排序
+        # NaN 表示完美匹配，不报告为问题
+        for img_path, scores in zip(self.image_paths, overlooked_scores):
+            valid_mask = ~np.isnan(scores)
+            if np.any(valid_mask):
+                # 取最低分数 (最可疑)
+                min_score = float(np.min(scores[valid_mask]))
+                # 添加到结果列表
+        
+        # 4. 按分数排序，取 TopK
+        results[IssueType.OVERLOOKED].sort(key=lambda x: x.score)
+        return {type: items[:top_k] for type, items in results.items()}
+```
+
+**关键优化**:
+- 使用 `auxiliary_inputs` 共享中间计算结果，加速 ~2x
+- 过滤 NaN 值: 完美匹配的框不报告为问题
+- TopK 策略: 取分数最低的 K 个样本，而非固定阈值
+
+#### 分数含义
+
+Cleanlab 为每个框计算质量分数 (0-1)，**分数越低表示问题越严重**:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Overlooked 分数                                         │
+│  ─────────────────────────────────────────────────────  │
+│  针对: 预测框                                            │
+│  低分 → 该预测框很可能是 GT 漏标的目标                   │
+│                                                          │
+│  Swapped 分数                                            │
+│  ─────────────────────────────────────────────────────  │
+│  针对: GT 框                                             │
+│  低分 → 该 GT 框的类别很可能标错                          │
+│                                                          │
+│  Bad Located 分数                                        │
+│  ─────────────────────────────────────────────────────  │
+│  针对: GT 框                                             │
+│  低分 → 该 GT 框的位置很可能不准                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 4. 全局状态管理 (`src/state.py`)
+
+系统使用全局单例管理应用状态：
+
+```python
+@dataclass
+class AppState:
+    config: SessionConfig              # 会话配置
+    results: AnalysisResults           # 分析结果
+    is_analyzing: bool                 # 分析状态
+    annotation_queue: List[IssueItem]  # 标注队列
+    current_annotation_index: int      # 当前标注索引
+    
+    def get_selected_issues(self, top_k: int = None) -> List[IssueItem]:
+        """合并选中类型的问题 (去重)"""
+        seen_paths = set()
+        merged = []
+        
+        # 对每个选中类型取 TopK，然后合并去重
+        if self.selected_overlooked:
+            items = self.results.overlooked[:top_k] if top_k else self.results.overlooked
+            for item in items:
+                if item.image_path not in seen_paths:
+                    seen_paths.add(item.image_path)
+                    merged.append(item)
+        # ... 类似处理 swapped 和 bad_located
+        
+        return merged
+
+# 全局实例
+app_state = AppState()
+```
+
+**设计要点**:
+- 去重逻辑: 同一图片可能出现在多种问题类型中，合并时去重
+- TopK 应用: 进入标注前对每个类型取 TopK，再合并
+
+### 5. Dashboard 页面 (`src/ui/page_dashboard.py`)
+
+#### 布局结构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Header: Annotation Refiner                                 │
+├──────────┬──────────────────────────┬───────────────────────┤
+│          │                          │                        │
+│ Config   │  Issue Lists (3 columns) │  Visualization        │
+│ Panel    │                          │  Panel                │
+│          │  ┌──────┬──────┬──────┐ │                        │
+│ - Paths  │  │Over- │Swap- │Bad   │ │  [Click issue to      │
+│ - Run    │  │looked│ped   │Loc.  │ │   visualize]          │
+│ - TopK   │  │      │      │      │ │                        │
+│          │  │List  │List  │List  │ │                        │
+│          │  └──────┴──────┴──────┘ │                        │
+│          │                          │                        │
+│          │  TopK: [10] [Refresh]    │                        │
+│          │  [Go to Annotation Tool]  │                        │
+└──────────┴──────────────────────────┴───────────────────────┘
+```
+
+#### 即时可视化
+
+点击问题列表项时，系统动态生成可视化图片：
+
+```python
+def _generate_visualization(self, item: IssueItem) -> str:
+    """生成可视化图片"""
+    # 加载图片和标签
+    img = Image.open(img_path)
+    gt_boxes = read_yolo_label(gt_label_path, img_w, img_h, has_confidence=False)
+    pred_boxes = read_yolo_label(pred_label_path, img_w, img_h, has_confidence=True)
+    
+    # 绘制
+    fig, ax = plt.subplots(1, 1, figsize=(10, 7))
+    ax.imshow(img)
+    
+    # GT 框: 绿色实线，问题框红色高亮
+    for i, box in enumerate(gt_boxes):
+        is_issue = (i == item.box_index and 
+                   item.issue_type in [IssueType.SWAPPED, IssueType.BAD_LOCATED])
+        color = 'red' if is_issue else 'lime'
+        # 绘制矩形...
+    
+    # Pred 框: 蓝色虚线，问题框橙色高亮
+    for i, box in enumerate(pred_boxes):
+        is_issue = (i == item.box_index and item.issue_type == IssueType.OVERLOOKED)
+        color = 'orange' if is_issue else 'deepskyblue'
+        # 绘制矩形...
+    
+    # 保存到临时文件
+    temp_path = tempfile.mkstemp(suffix='.png', prefix='refiner_viz_')
+    plt.savefig(temp_path, dpi=120)
+    return temp_path
+```
+
+### 6. Annotator 页面 (`src/ui/page_annotator.py`)
+
+#### 布局结构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Header: image_path | (15/47) | Issue Type | Score          │
+├──────────┬──────────┬──────────┬─────────────────────────────┤
+│          │          │          │                             │
+│ Viewer   │Navigator │Box List  │ Control Panel              │
+│ (900x600)│(Minimap) │          │                             │
+│          │          │ GT #0    │ Display Options            │
+│ [Image]  │[Thumb]   │ GT #1    │  ☑ Show GT                 │
+│          │          │ Pred #0  │  ☑ Show Pred               │
+│          │          │ ...      │                             │
+│          │          │          │ Zoom Controls               │
+│ [Prev]   │          │ [👁]     │  [1x] [+][-][Reset]         │
+│ [Next]   │          │          │  [Slider]                    │
+│          │          │          │                             │
+│          │          │          │ Box Actions                 │
+│          │          │          │  [Swap Editable]            │
+│          │          │          │  [Clear Editable]           │
+│          │          │          │  [Activate Reference]       │
+│          │          │          │                             │
+│          │          │          │ Save Controls                │
+│          │          │          │  ☑ Auto Save                │
+│          │          │          │  [Save]                     │
+│          │          │          │  [Go Back to Analysis]      │
+└──────────┴──────────┴──────────┴─────────────────────────────┘
+```
+
+#### 保存机制
+
+```python
+def _on_save(self):
+    """保存当前标注 (只保存 editable=True 的框)"""
+    # 获取所有框
+    all_boxes = self.annotator.get_all_boxes()
+    
+    # 过滤可编辑框 (支持 Pred 框激活后保存)
+    boxes_dict = []
+    for box in all_boxes:
+        if getattr(box, 'editable', True):
+            boxes_dict.append({
+                'class_id': box.class_id,
+                'bbox': [box.x, box.y, box.x + box.w, box.y + box.h]
+            })
+    
+    # 保存到临时文件: {stem}_tmp.txt
+    save_tmp_annotation(
+        app_state.config.gt_labels_path,
+        item.image_path,
+        boxes_dict,
+        img_w, img_h
+    )
+
+def _on_back(self):
+    """返回时确认保存"""
+    tmp_files = get_tmp_files(app_state.config.gt_labels_path)
+    
+    if not tmp_files:
+        # 无修改，直接返回
+        ui.navigate.to('/')
+    else:
+        # 显示确认对话框
+        # Yes: 覆盖原文件 (confirm_changes(keep_changes=True))
+        # No: 删除临时文件 (confirm_changes(keep_changes=False))
+        # Cancel: 停留在当前页面
+```
+
+### 7. InteractiveAnnotator 组件 (`src/ui/components.py`)
+
+#### 交互功能
+
+**鼠标操作**:
+- 点击框: 选中框 (显示 8 个控制点)
+- 拖拽框: 移动框
+- 拖拽控制点: 调整大小 (4 角 + 4 边)
+- 空白区域拖拽: 创建新框
+
+**键盘快捷键**:
+```
+┌─────────────────────────────────────────────────────────┐
+│  导航                                                    │
+│  [ / ]       上一张/下一张图片                         │
+│  Tab          循环选中 GT 框                             │
+│                                                          │
+│  编辑                                                    │
+│  Del/Backspace  删除选中框                              │
+│  Arrow Keys    移动选中框 (1px, Shift=10px)             │
+│  q/w/e/r       修改类别为 0/1/2/3                       │
+│  a/s/d/f       边框向外扩展 (Shift 反向)                 │
+│  z/x/c/v       角向外扩展 (Shift 反向)                  │
+│  Ctrl+Z/Y      撤销/重做                                │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 一键操作
+
+```python
+def swap_editable(self):
+    """交换所有框的可编辑状态 (GT ↔ Pred 角色互换)"""
+    for box in self.gt_boxes + self.pred_boxes:
+        box.editable = not box.editable
+    self._save_history()
+
+def clear_editable(self):
+    """删除所有可编辑框"""
+    self.gt_boxes = [b for b in self.gt_boxes if not b.editable]
+    self.pred_boxes = [b for b in self.pred_boxes if not b.editable]
+    self._save_history()
+
+def activate_reference(self):
+    """将参照框改为可编辑 (合并 Pred 到 GT)"""
+    for box in self.pred_boxes:
+        if not box.editable:
+            box.editable = True
+    self._save_history()
+```
+
+**使用场景**:
+- **Swap Editable**: 当 Pred 框质量更好时，交换角色进行编辑
+- **Clear Editable**: 快速删除所有 GT 框，重新标注
+- **Activate Reference**: 将 Pred 框合并到 GT，用于补充漏标
 
 ---
 
-## 测试数据与结果
+## 数据流程
 
-### 测试数据路径
+### 输入数据格式
 
-| 数据类型 | 路径 |
-|---------|------|
-| Images | `/home/yangxinyu/Test/Data/internalVideos_fireRelated_annotatedFrames` |
-| GT Labels | `/home/yangxinyu/Test/Data/internalVideos_fireRelated_keyFrameAnnotations_before` |
-| Pred Labels | `/home/yangxinyu/Test/Data/internalVideos_fireRelated_annotatedFrames_predictions` |
-
-### 测试结果统计
-
-| 指标 | 数值 |
-|-----|------|
-| 图片总数 | 22,797 |
-| GT 标签文件数 | 23,854 |
-| Pred 标签文件数 | 22,148 |
-| 检测到的类别数 | 2 |
-| Overlooked 问题数 | 0（模型预测与 GT 匹配良好）|
-| Swapped 问题数 | ~1000（TopK=1000 时）|
-| Bad Located 问题数 | ~1000（TopK=1000 时）|
-
----
-
-## 数据格式说明
-
-### 目录结构
+#### 目录结构
 
 ```
 {root}/
 ├── {category}/
 │   ├── {video}/
 │   │   ├── frame_00025.jpg
-│   │   ├── frame_00025.txt
+│   │   ├── frame_00025.txt      # GT 标签
 │   │   └── ...
 │   └── ...
 └── ...
 ```
 
-### YOLO 标签格式
+#### YOLO 标签格式
 
-**GT 格式**（无置信度）:
+**GT 格式** (无置信度):
 ```
 class_id center_x center_y width height
 0 0.413644 0.451847 0.028454 0.051783
 ```
 
-**Pred 格式**（有置信度）:
+**Pred 格式** (有置信度):
 ```
 class_id center_x center_y width height confidence
 0 0.413615 0.451451 0.029636 0.056187 0.793027
 ```
 
----
+### 数据转换流程
 
-## Cleanlab 分析机制
+```
+┌─────────────────────────────────────────────────────────┐
+│  1. YOLO 格式 (归一化坐标)                               │
+│     class_id cx cy w h [confidence]                     │
+│                                                          │
+│  2. 像素坐标转换                                         │
+│     yolo_to_pixel() → (x1, y1, x2, y2)                  │
+│                                                          │
+│  3. Cleanlab 格式                                        │
+│     GT: {'bboxes': np.array, 'labels': np.array}        │
+│     Pred: np.array of arrays (按类别分组)                │
+│                                                          │
+│  4. 分析结果                                             │
+│     IssueItem(image_path, issue_type, score, box_index)  │
+│                                                          │
+│  5. UI 层 BBox                                           │
+│     BBox(x, y, w, h, class_id, source, editable, ...)    │
+│                                                          │
+│  6. 保存回 YOLO 格式                                     │
+│     pixel_to_yolo() → (cx, cy, w, h)                    │
+└─────────────────────────────────────────────────────────┘
+```
 
-### 分数含义
+### 临时文件机制
 
-Cleanlab 为每个框计算质量分数（0-1），**分数越低表示问题越严重**：
+```
+原始文件: category/video/frame_00025.txt
+临时文件: category/video/frame_00025_tmp.txt
 
-- **Overlooked 分数**: 针对预测框，低分表示该预测框很可能是 GT 漏标的目标
-- **Swap 分数**: 针对 GT 框，低分表示该 GT 框的类别很可能标错
-- **Bad Located 分数**: 针对 GT 框，低分表示该 GT 框的位置很可能不准
+加载逻辑:
+  1. 优先读取 _tmp.txt (如果存在)
+  2. 否则读取原始 .txt
 
-### TopK 策略
-
-当前实现采用 TopK 策略（而非固定阈值），取分数最低的 K 个样本作为最可疑的问题样本。原因：
-1. 不同数据集的分数分布不同，固定阈值不通用
-2. TopK 让用户可以控制审核工作量
-
----
-
-## 已完成功能：阶段七
-
-### 阶段七：集成测试与易用性优化
-
-#### 7.1 新功能：标注框列表面板
-
-在 Navigator 缩略图右侧、Control Panel 左侧增加 Box List 面板：
-- [x] 显示所有 GT 和 Pred 框（序号、类别、来源）
-- [x] 点击列表项可选中标注区域对应框（仅可编辑框）
-- [x] 每个框右侧有"眼睛"图标，控制单框显示/隐藏
-- [x] 数据模型 `BBox` 新增 `visible` 字段
-
-#### 7.2 UI 优化：类别标签放大
-
-- [x] 类别标签字体从 12px 放大到 16px
-- [x] 添加白色半透明背景（85%不透明度），增强对比度
-
-#### 7.3 新功能：一键处理（GT/Pred 可编辑状态切换）
-
-数据模型 `BBox` 新增 `editable` 字段，支持灵活整合 GT 和 Pred 数据：
-- [x] `editable=True`: 可编辑（实线边框）
-- [x] `editable=False`: 仅参照（虚线边框）
-- [x] 默认：GT 可编辑，Pred 不可编辑
-
-新增三个一键操作按钮：
-- [x] **Swap Editable**: 切换所有框的可编辑状态（GT<->Pred 角色互换）
-- [x] **Clear Editable**: 删除全部可编辑框
-- [x] **Activate Reference**: 将参照框改为可编辑（合并 Pred 到 GT）
-- [x] 三个操作均支持撤销/重做
-
-#### 7.4 已知问题修复
-
-- [x] BUG-001：缩放焦点定位（选中框后缩放正确居中到选中框）
-- [x] 拖拽平移已禁用（有坐标计算问题，保持现状，使用滚动条/minimap）
-
-#### 7.5 端到端测试
-
-- [x] 完整工作流测试（页面A -> 分析 -> 页面B -> 编辑 -> 保存 -> 返回）
-- [x] 单元测试：BBox 模型测试、一键操作逻辑测试
-- [x] 撤销/重做测试
-
-#### 7.6 保存逻辑增强
-
-- [x] 保存时只导出 `editable=True` 的框（支持 Pred 框激活后保存）
-- [x] HistoryState 保存完整状态（包括 pred_boxes、visible、editable）
+保存逻辑:
+  1. 编辑后保存到 _tmp.txt
+  2. 返回时确认:
+     - Yes: _tmp.txt → .txt (覆盖)
+     - No: 删除 _tmp.txt
+```
 
 ---
 
-## 使用示例
+## 关键技术与概念
 
-### 命令行启动
+### 1. Cleanlab 问题检测原理
+
+Cleanlab 基于置信学习 (Confident Learning) 理论，通过比较模型预测与标注的一致性来识别标签问题。
+
+#### Overlooked 检测
+
+```
+模型预测: [Pred Box A, Pred Box B, ...]
+GT 标注:  [GT Box A]
+
+问题: Pred Box B 在 GT 中无对应框
+      → 可能是 GT 漏标了该目标
+      → Overlooked 分数低
+```
+
+#### Swapped 检测
+
+```
+GT Box A: class_id=0 (类别 0)
+Pred Box A: class_id=1 (类别 1), IoU 高
+
+问题: 位置匹配但类别不一致
+      → 可能是 GT 类别标错
+      → Swap 分数低
+```
+
+#### Bad Located 检测
+
+```
+GT Box A: (x1, y1, x2, y2)
+Pred Box A: (x1', y1', x2', y2'), IoU < 阈值
+
+问题: 类别匹配但位置偏差大
+      → 可能是 GT 框位置不准
+      → Bad Located 分数低
+```
+
+### 2. TopK 策略 vs 固定阈值
+
+**为什么使用 TopK**:
+
+```
+固定阈值的问题:
+  - 不同数据集分数分布不同
+  - 难以设置通用阈值
+  - 可能漏掉重要问题或包含过多噪声
+
+TopK 策略的优势:
+  - 自适应: 取最可疑的 K 个样本
+  - 可控: 用户控制审核工作量
+  - 通用: 适用于各种数据集
+```
+
+**实现**:
+```python
+# 对每种问题类型分别取 TopK
+overlooked_items.sort(key=lambda x: x.score)
+results[IssueType.OVERLOOKED] = overlooked_items[:top_k]
+
+# 合并时去重 (同一图片可能出现在多种类型中)
+def get_selected_issues(self, top_k: int = None):
+    seen_paths = set()
+    merged = []
+    # ... 合并逻辑
+```
+
+### 3. 并行处理优化
+
+#### 自动策略选择
+
+```python
+PARALLEL_THRESHOLD = 10000
+
+if num_samples >= PARALLEL_THRESHOLD:
+    # 并行: 大数据集
+    num_workers = min(multiprocessing.cpu_count(), 32)
+else:
+    # 串行: 小数据集 (避免进程创建开销)
+```
+
+#### 进程池配置
+
+```python
+# 最优配置
+chunksize = max(1, len(tasks) // (workers * 4))
+
+# 原因: 
+# - chunksize 太小: 进程间通信开销大
+# - chunksize 太大: 负载不均衡
+# - 经验值: tasks / (workers * 4)
+```
+
+#### 性能提升
+
+```
+数据集规模: 100 万样本
+串行处理: ~7.7 分钟
+并行处理: ~1.3-2.6 分钟 (32 进程)
+加速比: 3-6x
+```
+
+### 4. 撤销/重做机制
+
+```python
+@dataclass
+class HistoryState:
+    """历史状态快照"""
+    gt_boxes: List[BBox]
+    pred_boxes: List[BBox]
+    selected_id: Optional[str] = None
+
+class InteractiveAnnotator:
+    history: List[HistoryState] = []
+    history_index: int = -1
+    MAX_HISTORY = 50
+    
+    def _save_history(self):
+        """保存当前状态到历史栈"""
+        state = HistoryState(
+            gt_boxes=deepcopy(self.gt_boxes),
+            pred_boxes=deepcopy(self.pred_boxes),
+            selected_id=self.selected_box_id
+        )
+        
+        # 删除当前索引之后的历史 (分支操作)
+        self.history = self.history[:self.history_index + 1]
+        
+        # 添加新状态
+        self.history.append(state)
+        self.history_index = len(self.history) - 1
+        
+        # 限制历史长度
+        if len(self.history) > self.MAX_HISTORY:
+            self.history.pop(0)
+            self.history_index -= 1
+    
+    def undo(self):
+        """撤销"""
+        if self.history_index > 0:
+            self.history_index -= 1
+            self._restore_state(self.history[self.history_index])
+    
+    def redo(self):
+        """重做"""
+        if self.history_index < len(self.history) - 1:
+            self.history_index += 1
+            self._restore_state(self.history[self.history_index])
+```
+
+**设计要点**:
+- 深拷贝: 避免状态被意外修改
+- 分支处理: 新操作时删除后续历史
+- 长度限制: 最多保存 50 步历史
+
+### 5. 可编辑状态设计
+
+`editable` 字段实现了 GT/Pred 框的灵活整合:
+
+```python
+# 默认状态
+GT boxes:   editable=True  (可编辑，实线边框)
+Pred boxes:  editable=False   (仅参照，虚线边框)
+
+# Swap Editable 后
+GT boxes:   editable=False   (变为参照)
+Pred boxes:  editable=True    (变为可编辑)
+
+# 使用场景
+1. Pred 框质量更好 → Swap → 编辑 Pred 框
+2. 重新标注 → Clear Editable → 创建新框
+3. 补充漏标 → Activate Reference → Pred 框合并到 GT
+```
+
+### 6. 缩放与平移实现
+
+```python
+# 缩放级别
+ZOOM_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+# 缩放焦点定位 (修复 BUG-001)
+def zoom_to_box(self, box_id: str, target_zoom: float):
+    """缩放并居中到指定框"""
+    box = self._find_box(box_id)
+    if box:
+        # 计算框中心
+        center_x = box.x + box.w / 2
+        center_y = box.y + box.h / 2
+        
+        # 设置缩放
+        self.zoom = target_zoom
+        
+        # 调整平移，使框中心位于视图中心
+        view_center_x = self.fixed_width / 2
+        view_center_y = self.fixed_height / 2
+        
+        self.pan_x = center_x - (view_center_x / self.zoom)
+        self.pan_y = center_y - (view_center_y / self.zoom)
+```
+
+### 7. 性能优化技巧
+
+#### auxiliary_inputs 优化
+
+```python
+# 优化前: 三次独立计算，重复计算相似度矩阵
+overlooked_scores = compute_overlooked_box_scores(...)
+swap_scores = compute_swap_box_scores(...)
+badloc_scores = compute_badloc_box_scores(...)
+
+# 优化后: 预计算共享输入
+auxiliary_inputs = _get_valid_inputs_for_compute_scores(...)
+overlooked_scores = compute_overlooked_box_scores(auxiliary_inputs=auxiliary_inputs)
+swap_scores = compute_swap_box_scores(auxiliary_inputs=auxiliary_inputs)
+badloc_scores = compute_badloc_box_scores(auxiliary_inputs=auxiliary_inputs)
+
+# 加速: ~2x
+```
+
+#### NaN 值过滤
+
+```python
+# NaN 表示完美匹配，不报告为问题
+valid_mask = ~np.isnan(scores)
+if np.any(valid_mask):
+    valid_scores = scores[valid_mask]
+    min_score = float(np.min(valid_scores))
+    # 只处理有效分数
+```
+
+---
+
+## 启动与使用
+
+### 启动应用
 
 ```bash
-cd /home/yangxinyu/Test/Projects/refiner/anno_refiner_app
+cd anno_refiner_app
 python main.py --port 8088
 ```
 
-### Python API 调用
+访问 `http://localhost:8088`
 
-```python
-from anno_refiner_app.src.core.analyzer import CleanlabAnalyzer
-from anno_refiner_app.src.models import IssueType
+### 基本使用流程
 
-# 创建分析器
-analyzer = CleanlabAnalyzer(
-    images_path="/path/to/images",
-    pred_labels_path="/path/to/predictions",
-    gt_labels_path="/path/to/gt_labels",
-    progress_callback=lambda msg, pct: print(f"[{pct*100:.0f}%] {msg}")
-)
-
-# 准备数据
-analyzer.prepare_data()
-
-# 执行分析
-results = analyzer.analyze(top_k=10)
-
-# 访问结果
-for issue in results[IssueType.BAD_LOCATED]:
-    print(f"{issue.image_path}: score={issue.score:.4f}, box={issue.box_index}")
 ```
+1. 配置路径
+   ├─ Images Path: 图片目录
+   ├─ GT Labels Path: GT 标签目录
+   ├─ Pred Labels Path: 预测标签目录
+   └─ Classes File (可选): 类别映射文件
 
-### InteractiveAnnotator 组件使用
+2. 运行分析
+   └─ 点击 "RUN ANALYSIS" → 等待完成
 
-```python
-from nicegui import ui
-from TEST_stage_5.interactive_annotator import InteractiveAnnotator
-from anno_refiner_app.src.models import BBox, BoxSource
+3. 查看问题
+   ├─ 三列问题列表显示
+   ├─ 点击问题项查看可视化
+   └─ 选择问题类型 (复选框)
 
-# 创建组件
-def on_boxes_changed(boxes):
-    print(f"GT boxes updated: {len(boxes)} boxes")
+4. 进入标注
+   ├─ 设置 TopK 值
+   └─ 点击 "Go to Annotation Tool"
 
-annotator = InteractiveAnnotator(
-    on_change=on_boxes_changed,
-    on_zoom_change=lambda z: print(f"Zoom: {z}x")
-)
+5. 编辑标注
+   ├─ 使用鼠标/键盘编辑框
+   ├─ 使用一键操作快速处理
+   └─ 保存修改 (手动或自动)
 
-# 在 UI 容器中创建
-container = ui.element('div')
-annotator.create_ui(container, fixed_width=900, fixed_height=600)
-
-# 加载图片和标注
-annotator.load_image('/path/to/image.jpg')
-annotator.load_boxes(gt_boxes, pred_boxes)
-
-# 控制显示
-annotator.set_display_options(show_gt=True, show_pred=True)
-
-# 缩放控制
-annotator.set_zoom(2.0)  # 设置 2x 缩放
-annotator.zoom_in()      # 放大
-annotator.zoom_out()     # 缩小
-annotator.reset_zoom()   # 重置为 1x
-
-# 获取编辑后的 GT 框
-edited_boxes = annotator.get_gt_boxes()
+6. 确认保存
+   └─ 返回时选择 Keep/Discard
 ```
-
-### 阶段五测试页面启动
-
-```bash
-cd /home/yangxinyu/Test/Projects/refiner/TEST_stage_5
-/home/yangxinyu/Test/anaconda3/envs/parse/bin/python test_annotator.py --port 8089
-```
-
-然后访问 `http://localhost:8089`
 
 ---
 
-## 变更日志
+## 项目结构总结
 
-### 2026-01-15
+```
+refiner/
+├── anno_refiner_app/          # 主应用
+│   ├── main.py                # 入口: 路由配置
+│   └── src/
+│       ├── models.py          # 数据模型
+│       ├── state.py           # 状态管理
+│       ├── core/              # 核心模块
+│       │   ├── yolo_utils.py  # YOLO 转换
+│       │   ├── file_manager.py # 文件管理
+│       │   └── analyzer.py    # Cleanlab 分析
+│       └── ui/                # 用户界面
+│           ├── components.py  # 标注组件
+│           ├── page_dashboard.py # Dashboard
+│           └── page_annotator.py # Annotator
+└── DOC/                       # 文档
+    └── refiner_implementation_status.md
+```
 
-- 初始化项目结构
-- 完成阶段一至三的实现
-- 通过全部单元测试和集成测试
-- 生成问题样本可视化
-- 创建本状态追踪文档
-- 完成阶段四 Dashboard 页面开发
-- 实现点击即时可视化功能
-- 优化布局：三列固定高度问题列表 + 可视化面板
-- 修复 backup 默认值问题（改为默认关闭）
-- 添加 TopK 刷新按钮
-- **完成阶段五 InteractiveAnnotator 组件开发**
-  - 基于 NiceGUI ui.interactive_image 的交互式标注组件
-  - 支持鼠标拖拽（移动、调整大小、创建框）
-  - 支持 8 方向控制点（4 角 + 4 边）
-  - 丰富的键盘快捷键（类别修改、边框微调、角微调）
-  - 缩放（1x-10x）与平移功能
-  - 撤销/重做历史栈
-  - 独立测试页面验证通过
-- **完成阶段六 页面B - Annotator 开发**
-  - 复制 InteractiveAnnotator 到 `src/ui/components.py`
-  - 创建 `src/ui/page_annotator.py` 实现完整页面
-  - 标题栏显示路径、进度、问题类型、分数
-  - 控制面板：Display Options、Zoom、Class、Save
-  - 图片导航：`[`/`]` 键 + Prev/Next 按钮
-  - 保存逻辑：手动保存、Auto Save、tmp 文件管理
-  - 返回确认：检测修改、三选项对话框（Keep/Discard/Cancel）
-  - 更新 main.py 路由
-  - 单元测试和集成测试通过
-- **页面B 优化与修复**
-  - 移除左上角后退按钮，强制用户通过 "Go Back to Analysis" 确认保存
-  - 修正样本数量显示：分析结果按类别独立显示数量
-  - 修正 TopK 逻辑：进入 annotation 时对每个选中类型取 TopK 再合并去重
-  - 修复确认对话框按钮文字居中对齐
-  - 禁用放大状态下的拖动平移（有坐标计算问题），改用滚动条平移
+---
 
-### 2026-01-16
+## 参考资源
 
-- **完成阶段七：集成测试与易用性优化**
-  - 新增 Box List 面板：显示所有框、点击选中、眼睛图标控制可见性
-  - 放大类别标签字体（12px -> 16px）并添加白色背景
-  - 新增 `visible` 和 `editable` 字段到 BBox 数据模型
-  - 新增三个一键操作按钮：Swap Editable、Clear Editable、Activate Reference
-  - 修复 BUG-001：缩放焦点定位问题（选中框后缩放正确居中）
-  - 增强 HistoryState：保存 pred_boxes 和所有框属性
-  - 增强保存逻辑：只保存 editable=True 的框
-  - 创建单元测试：test_models.py、test_annotator_logic.py
-  - 创建端到端测试运行器：test_e2e_runner.py
-  - 编写阶段7技术文档：DOC/stage_7_summary.md
-- **完成阶段八：性能优化**
-  - 阶段一：使用 `auxiliary_inputs` 优化 Cleanlab 分析阶段（加速 ~2x）
-  - 阶段二：实现基于 ProcessPoolExecutor 的数据准备并行化
-    - 自动选择策略：小样本（<10k）使用串行，大样本（≥10k）使用并行
-    - 最优配置：32 进程，chunksize = len(tasks) // (workers * 4)
-    - 预期加速：100 万样本时 3-6x 加速（从 ~7.7 分钟降至 ~1.3-2.6 分钟）
-  - 添加详细的性能日志记录（各步骤耗时统计）
-  - 编写性能分析文档：DOC/run_analysis_performance_analysis.md
-  - 编写并行化分析文档：DOC/parallelization_analysis.md
-  - 编写并行化成功原因分析：DOC/parallelization_success_explanation.md
+- **Cleanlab**: https://github.com/cleanlab/cleanlab
+- **NiceGUI**: https://nicegui.io/
+- **YOLO 格式**: https://docs.ultralytics.com/datasets/
