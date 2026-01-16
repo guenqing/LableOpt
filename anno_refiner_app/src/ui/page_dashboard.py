@@ -133,7 +133,7 @@ class DashboardPage:
                 
                 # Run button
                 self.run_button = ui.button(
-                    'RUN CLEANLAB ANALYSIS',
+                    'RUN ANALYSIS',
                     on_click=self._run_analysis,
                     icon='play_arrow'
                 ).classes('w-full').props('color=primary')
@@ -160,16 +160,7 @@ class DashboardPage:
     def _create_issue_lists(self):
         """Create the three issue list columns"""
         with ui.column().classes('flex-shrink-0 gap-2'):
-            # TopK control row
-            with ui.row().classes('items-center gap-2 mb-1'):
-                ui.label('Analysis Results').classes('text-base font-bold text-gray-700')
-                ui.label('|').classes('text-gray-300')
-                ui.label('TopK:').classes('text-xs text-gray-500')
-                self.topk_input = ui.number(value=10, min=1, max=1000, step=1).classes('w-16').props('dense outlined size=small')
-                self.refresh_button = ui.button(icon='refresh', on_click=self._on_refresh_topk).props('flat dense size=sm')
-                self.refresh_button.disable()
-            
-            # Three issue columns
+            # Three issue columns (header row aligned with config panel)
             with ui.row().classes('gap-2'):
                 # Overlooked
                 with ui.card().classes('w-56 shadow').style('border-left: 4px solid #f59e0b'):
@@ -194,6 +185,13 @@ class DashboardPage:
                             self.badloc_checkbox = ui.checkbox('Bad Located', value=True).classes('text-sm')
                             self.badloc_count = ui.badge('0').props('color=purple')
                         self.badloc_container = ui.scroll_area().classes('w-full h-80 issue-list')
+            
+            # TopK control row (below issue lists)
+            with ui.row().classes('items-center gap-2 mt-2'):
+                ui.label('TopK:').classes('text-xs text-gray-500')
+                self.topk_input = ui.number(value=10, min=1, max=1000, step=1).classes('w-16').props('dense outlined size=small')
+                self.refresh_button = ui.button(icon='refresh', on_click=self._on_refresh_topk).props('flat dense size=sm')
+                self.refresh_button.disable()
             
             # Go to annotation button
             with ui.row().classes('justify-end mt-2'):

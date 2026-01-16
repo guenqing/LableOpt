@@ -39,10 +39,12 @@ class AnnotatorPage:
         self.save_button = None
         self.zoom_label = None
         self.zoom_slider = None
-        self.class_select = None
         self.show_gt_checkbox = None
         self.show_pred_checkbox = None
         self.auto_save_checkbox = None
+        
+        # Box list panel components
+        self.box_list_container = None
         
         # Keyboard listener reference
         self.page_keyboard = None
@@ -73,12 +75,18 @@ class AnnotatorPage:
             # Header bar
             self._create_header()
             
-            # Main content area
-            with ui.row().classes('flex-grow w-full'):
-                # Left: Annotator area
-                self._create_annotator_area()
+            # Main content area: Viewer | Navigator | Box List | Config
+            with ui.row().classes('w-full p-4 gap-4 items-start flex-nowrap'):
+                # Column 1: Viewer (main image area)
+                self._create_viewer_area()
                 
-                # Right: Control panel
+                # Column 2: Navigator (minimap)
+                self._create_navigator_area()
+                
+                # Column 3: Box List panel
+                self._create_box_list_panel()
+                
+                # Column 4: Config panel (no title)
                 self._create_control_panel()
         
         # Set up page-level keyboard listener for navigation
@@ -106,21 +114,23 @@ class AnnotatorPage:
                     ui.label('|').classes('text-gray-300')
                     self.issue_info_label = ui.label('').classes('text-sm')
     
-    def _create_annotator_area(self):
-        """Create the annotator component area"""
-        with ui.column().classes('flex-grow p-4'):
-            # Annotator container
-            annotator_container = ui.column().classes('bg-white rounded-lg shadow p-2')
+    def _create_viewer_area(self):
+        """Create the Viewer (main image area) with fixed size"""
+        # Fixed width container for Viewer - prevents layout shift on zoom
+        with ui.column().classes('flex-shrink-0 gap-2'):
+            # Viewer container with fixed size
+            viewer_container = ui.column().classes('bg-white rounded-lg shadow p-2')
             
-            # Create annotator
+            # Create annotator (Viewer only, Navigator created separately)
             self.annotator = InteractiveAnnotator(
                 on_change=self._on_boxes_changed,
                 on_zoom_change=self._on_zoom_changed
             )
-            self.annotator.create_ui(annotator_container, fixed_width=900, fixed_height=600)
+            # Create Viewer without Navigator (navigator_container=None means no navigator here)
+            self.annotator.create_ui(viewer_container, fixed_width=900, fixed_height=600)
             
-            # Navigation buttons below annotator
-            with ui.row().classes('w-full justify-center gap-4 mt-4'):
+            # Navigation buttons below Viewer
+            with ui.row().classes('w-full justify-center gap-4 mt-2'):
                 self.prev_button = ui.button(
                     'Prev', 
                     icon='chevron_left',
@@ -133,10 +143,110 @@ class AnnotatorPage:
                     on_click=self._on_next
                 ).props('outline icon-right')
     
+    def _create_navigator_area(self):
+        """Create the Navigator (minimap) area"""
+        # Navigator container - fixed size proportional to Viewer
+        with ui.column().classes('flex-shrink-0 gap-1'):
+            navigator_container = ui.column().classes('bg-white rounded-lg shadow p-2')
+            # Create Navigator in this container
+            if self.annotator:
+                self.annotator.create_navigator(navigator_container)
+    
+    def _create_box_list_panel(self):
+        """Create box list panel showing all GT and Pred boxes"""
+        # Box List panel - height matches Config panel
+        with ui.card().classes('w-48 flex-shrink-0'):
+            with ui.column().classes('w-full p-3 gap-2'):
+                ui.label('Box List').classes('text-sm font-bold text-gray-700')
+                
+                # Scrollable container for box list - use flex-grow to fill available height
+                with ui.scroll_area().classes('w-full').style('height: 580px;') as scroll_area:
+                    self.box_list_container = ui.column().classes('w-full gap-1')
+    
+    def _update_box_list(self):
+        """Update the box list panel with current boxes"""
+        if not self.box_list_container or not self.annotator:
+            return
+        
+        self.box_list_container.clear()
+        
+        all_boxes = self.annotator.get_all_boxes()
+        gt_count = 0
+        pred_count = 0
+        
+        with self.box_list_container:
+            for box in all_boxes:
+                source = box.source.value if isinstance(box.source, BoxSource) else box.source
+                is_gt = source == 'gt'
+                
+                # Index for display
+                if is_gt:
+                    idx = gt_count
+                    gt_count += 1
+                    prefix = 'GT'
+                    color_class = 'text-green-600'
+                    bg_class = 'bg-green-50'
+                else:
+                    idx = pred_count
+                    pred_count += 1
+                    prefix = 'Pred'
+                    color_class = 'text-blue-600'
+                    bg_class = 'bg-blue-50'
+                
+                # Check if this box is selected
+                is_selected = self.annotator.selected_box_id == box.id
+                selected_class = 'ring-2 ring-red-500' if is_selected else ''
+                
+                # Check visibility and editable status
+                is_visible = getattr(box, 'visible', True)
+                is_editable = getattr(box, 'editable', True)
+                
+                # Box row container
+                with ui.row().classes(f'w-full items-center gap-1 p-1 rounded cursor-pointer {bg_class} {selected_class}') \
+                        .on('click', lambda e, b=box: self._on_box_list_click(b)):
+                    # Index and class info
+                    with ui.column().classes('flex-grow gap-0'):
+                        label_text = f'{prefix} #{idx}'
+                        ui.label(label_text).classes(f'text-xs font-medium {color_class}')
+                        class_text = f'Class: {box.class_id}'
+                        if not is_editable:
+                            class_text += ' (ref)'
+                        ui.label(class_text).classes('text-xs text-gray-500')
+                    
+                    # Eye icon for visibility toggle
+                    eye_icon = 'visibility' if is_visible else 'visibility_off'
+                    eye_color = 'text-gray-600' if is_visible else 'text-gray-300'
+                    ui.button(
+                        icon=eye_icon,
+                        on_click=lambda e, b=box: self._on_toggle_box_visibility(b)
+                    ).props('flat dense size=xs').classes(eye_color)
+    
+    def _on_box_list_click(self, box: BBox):
+        """Handle click on box list item"""
+        if not self.annotator:
+            return
+        
+        # Check if editable - only editable boxes can be selected
+        is_editable = getattr(box, 'editable', True)
+        if is_editable:
+            self.annotator.select_box_by_id(box.id)
+        
+        # Always update the list to show highlight
+        self._update_box_list()
+    
+    def _on_toggle_box_visibility(self, box: BBox):
+        """Toggle visibility of a box"""
+        if not self.annotator:
+            return
+        
+        current_visible = getattr(box, 'visible', True)
+        self.annotator.set_box_visible(box.id, not current_visible)
+        self._update_box_list()
+    
     def _create_control_panel(self):
-        """Create control panel on the right side"""
-        with ui.card().classes('w-72 flex-shrink-0 control-panel m-4'):
-            with ui.column().classes('w-full p-4 gap-4'):
+        """Create control panel (Config) on the right side - no title"""
+        with ui.card().classes('w-56 flex-shrink-0'):
+            with ui.column().classes('w-full p-3 gap-3'):
                 # Display Options
                 ui.label('Display Options').classes('text-sm font-bold text-gray-700')
                 with ui.column().classes('gap-1'):
@@ -169,13 +279,32 @@ class AnnotatorPage:
                 
                 ui.separator()
                 
-                # Current Class
-                ui.label('Current Class').classes('text-sm font-bold text-gray-700')
-                self.class_select = ui.select(
-                    options={0: '0', 1: '1', 2: '2', 3: '3'},
-                    value=0,
-                    on_change=self._on_class_change
-                ).classes('w-full')
+                # Box Actions (one-click operations)
+                ui.label('Box Actions').classes('text-sm font-bold text-gray-700')
+                with ui.column().classes('gap-2 w-full'):
+                    ui.button(
+                        'Swap Editable',
+                        icon='swap_horiz',
+                        on_click=self._on_swap_editable
+                    ).classes('w-full text-xs').props('outline dense').tooltip(
+                        'Swap editable status: editable boxes become reference, reference boxes become editable'
+                    )
+                    
+                    ui.button(
+                        'Clear Editable',
+                        icon='delete_sweep',
+                        on_click=self._on_clear_editable
+                    ).classes('w-full text-xs').props('outline dense color=negative').tooltip(
+                        'Delete all editable boxes'
+                    )
+                    
+                    ui.button(
+                        'Activate Reference',
+                        icon='check_circle',
+                        on_click=self._on_activate_reference
+                    ).classes('w-full text-xs').props('outline dense color=positive').tooltip(
+                        'Make all reference boxes editable'
+                    )
                 
                 ui.separator()
                 
@@ -245,6 +374,9 @@ class AnnotatorPage:
         # Update navigation buttons
         self._update_nav_buttons()
         
+        # Update box list panel
+        self._update_box_list()
+        
         # Reset zoom display
         self._on_zoom_changed(1.0)
     
@@ -290,22 +422,28 @@ class AnnotatorPage:
         pred_raw = read_yolo_label(pred_label_path, img_w, img_h, has_confidence=True)
         
         # Convert to BBox objects
+        # GT boxes: editable=True (can be edited)
         gt_boxes = []
         for i, box in enumerate(gt_raw):
             x1, y1, x2, y2 = box['bbox']
             gt_boxes.append(BBox(
                 x=x1, y=y1, w=x2-x1, h=y2-y1,
                 class_id=box['class_id'],
-                source=BoxSource.GT
+                source=BoxSource.GT,
+                visible=True,
+                editable=True
             ))
         
+        # Pred boxes: editable=False (reference only by default)
         pred_boxes = []
         for i, box in enumerate(pred_raw):
             x1, y1, x2, y2 = box['bbox']
             pred_boxes.append(BBox(
                 x=x1, y=y1, w=x2-x1, h=y2-y1,
                 class_id=box['class_id'],
-                source=BoxSource.PRED
+                source=BoxSource.PRED,
+                visible=True,
+                editable=False
             ))
         
         return gt_boxes, pred_boxes
@@ -329,6 +467,8 @@ class AnnotatorPage:
         """Callback when GT boxes change"""
         self.current_gt_boxes = boxes
         self.boxes_modified = True
+        # Update box list panel
+        self._update_box_list()
     
     def _on_display_change(self, e=None):
         """Handle display option change"""
@@ -364,14 +504,33 @@ class AnnotatorPage:
         if self.annotator:
             self.annotator.set_zoom(e.value)
     
-    def _on_class_change(self, e):
-        """Handle class selection change"""
+    def _on_swap_editable(self):
+        """Swap editable status of all boxes"""
         if self.annotator:
-            self.annotator.set_current_class(e.value)
+            self.annotator.swap_editable()
+            self._update_box_list()
+            ui.notify('Swapped editable status', type='info', position='bottom-right', timeout=1000)
+    
+    def _on_clear_editable(self):
+        """Delete all editable boxes"""
+        if self.annotator:
+            self.annotator.clear_editable()
+            self._update_box_list()
+            ui.notify('Cleared all editable boxes', type='warning', position='bottom-right', timeout=1000)
+    
+    def _on_activate_reference(self):
+        """Make all reference boxes editable"""
+        if self.annotator:
+            self.annotator.activate_reference()
+            self._update_box_list()
+            ui.notify('Activated reference boxes', type='positive', position='bottom-right', timeout=1000)
     
     def _on_save(self):
-        """Save current annotations"""
-        if not app_state.annotation_queue:
+        """Save current annotations
+        
+        Only saves boxes where editable=True (regardless of source GT/Pred)
+        """
+        if not app_state.annotation_queue or not self.annotator:
             return
         
         item = app_state.annotation_queue[app_state.current_annotation_index]
@@ -381,13 +540,17 @@ class AnnotatorPage:
         img_path = Path(app_state.config.images_path) / rel_path
         img_w, img_h = get_image_size(img_path)
         
-        # Convert BBox to dict format for save_tmp_annotation
+        # Get all boxes and filter for editable ones only
+        all_boxes = self.annotator.get_all_boxes()
+        
+        # Convert editable BBox to dict format for save_tmp_annotation
         boxes_dict = []
-        for box in self.current_gt_boxes:
-            boxes_dict.append({
-                'class_id': box.class_id,
-                'bbox': [box.x, box.y, box.x + box.w, box.y + box.h]
-            })
+        for box in all_boxes:
+            if getattr(box, 'editable', True):
+                boxes_dict.append({
+                    'class_id': box.class_id,
+                    'bbox': [box.x, box.y, box.x + box.w, box.y + box.h]
+                })
         
         # Save to tmp file
         save_tmp_annotation(

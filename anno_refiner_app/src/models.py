@@ -27,6 +27,8 @@ class BBox:
     source: BoxSource           # source
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     selected: bool = False
+    visible: bool = True        # whether to render this box
+    editable: bool = True       # whether this box can be edited
 
 
 @dataclass

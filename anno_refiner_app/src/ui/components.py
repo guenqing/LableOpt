@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class HistoryState:
-    """Snapshot of GT boxes state for undo/redo"""
+    """Snapshot of boxes state for undo/redo (includes visible and editable)"""
     gt_boxes: List[BBox]
+    pred_boxes: List[BBox]
     selected_id: Optional[str] = None
 
 
@@ -89,13 +90,16 @@ class InteractiveAnnotator:
         self.keyboard = None
         self.container = None
         
-    def create_ui(self, container, fixed_width: int = 800, fixed_height: int = 600) -> None:
+    def create_ui(self, container, fixed_width: int = 800, fixed_height: int = 600,
+                  navigator_container=None) -> None:
         """Create UI components in the specified container
         
         Args:
-            container: Parent container
+            container: Parent container for Viewer (main image area)
             fixed_width: Fixed width for the image area in pixels
             fixed_height: Fixed height for the image area in pixels
+            navigator_container: Optional separate container for Navigator (minimap).
+                                 If None, Navigator is created inside container.
         """
         self.container = container
         self.view_width = fixed_width
@@ -108,54 +112,67 @@ class InteractiveAnnotator:
         self.minimap_dragging = False
         
         with container:
-            # Main layout: image area + minimap on right
-            with ui.row().classes('gap-4 items-start'):
-                # Left: Main image with scrollbars
-                with ui.column().classes('gap-0'):
-                    # Row: image + vertical scrollbar
-                    with ui.row().classes('gap-1 items-stretch'):
-                        # Image container with fixed size and overflow hidden
-                        with ui.element('div').classes('relative flex-none') \
-                                .style(f'width: {fixed_width}px; height: {fixed_height}px; overflow: hidden;') \
-                                as self.scroll_container:
-                            # Inner container for transform
-                            with ui.element('div').classes('inline-block') \
-                                    .style('transform-origin: 0 0;') as self.transform_container:
-                                self.image_component = ui.interactive_image(
-                                    source='',
-                                    on_mouse=self._handle_mouse,
-                                    events=['mousedown', 'mouseup', 'mousemove'],
-                                    cross=False,
-                                    sanitize=False,
-                                ).classes('block')
-                        
-                        # Vertical scrollbar on right
-                        self.v_scrollbar = ui.slider(
-                            min=0, max=100, value=0,
-                            on_change=self._on_v_scroll
-                        ).props('vertical dense').style(f'height: {fixed_height}px;')
+            # Viewer: Main image with scrollbars (fixed size container)
+            with ui.column().classes('gap-0 flex-shrink-0'):
+                # Row: image + vertical scrollbar
+                with ui.row().classes('gap-1 items-stretch'):
+                    # Image container with fixed size and overflow hidden
+                    with ui.element('div').classes('relative flex-none') \
+                            .style(f'width: {fixed_width}px; height: {fixed_height}px; overflow: hidden;') \
+                            as self.scroll_container:
+                        # Inner container for transform
+                        with ui.element('div').classes('inline-block') \
+                                .style('transform-origin: 0 0;') as self.transform_container:
+                            self.image_component = ui.interactive_image(
+                                source='',
+                                on_mouse=self._handle_mouse,
+                                events=['mousedown', 'mouseup', 'mousemove'],
+                                cross=False,
+                                sanitize=False,
+                            ).classes('block')
                     
-                    # Horizontal scrollbar at bottom
-                    with ui.row().classes('gap-1'):
-                        self.h_scrollbar = ui.slider(
-                            min=0, max=100, value=0,
-                            on_change=self._on_h_scroll
-                        ).props('dense').style(f'width: {fixed_width}px;')
+                    # Vertical scrollbar on right
+                    self.v_scrollbar = ui.slider(
+                        min=0, max=100, value=0,
+                        on_change=self._on_v_scroll
+                    ).props('vertical dense').style(f'height: {fixed_height}px;')
                 
-                # Right: Minimap navigator
-                with ui.column().classes('gap-1'):
-                    ui.label('Navigator').classes('text-xs text-gray-500')
-                    self.minimap_component = ui.interactive_image(
-                        source='',
-                        on_mouse=self._handle_minimap_mouse,
-                        events=['mousedown', 'mouseup', 'mousemove'],
-                        cross=False,
-                        sanitize=False,
-                    ).style(f'width: {self.minimap_width}px; height: {self.minimap_height}px; object-fit: contain;') \
-                     .classes('border border-gray-300 rounded cursor-pointer')
+                # Horizontal scrollbar at bottom
+                with ui.row().classes('gap-1'):
+                    self.h_scrollbar = ui.slider(
+                        min=0, max=100, value=0,
+                        on_change=self._on_h_scroll
+                    ).props('dense').style(f'width: {fixed_width}px;')
             
             # Set up keyboard listener
             self.keyboard = ui.keyboard(on_key=self._handle_key, ignore=['input', 'select', 'textarea'])
+        
+        # Navigator: Create in separate container if provided, otherwise skip
+        # (Navigator can be created later via create_navigator method)
+        if navigator_container is not None:
+            self.create_navigator(navigator_container)
+    
+    def create_navigator(self, container) -> None:
+        """Create Navigator (minimap) in the specified container
+        
+        Args:
+            container: Container for the Navigator
+        """
+        with container:
+            ui.label('Navigator').classes('text-xs text-gray-500')
+            self.minimap_component = ui.interactive_image(
+                source='',
+                on_mouse=self._handle_minimap_mouse,
+                events=['mousedown', 'mouseup', 'mousemove'],
+                cross=False,
+                sanitize=False,
+            ).style(f'width: {self.minimap_width}px; height: {self.minimap_height}px; object-fit: contain;') \
+             .classes('border border-gray-300 rounded cursor-pointer')
+        
+        # Load current image into minimap if already loaded
+        if self.image_path:
+            self.minimap_component.set_source(self.image_path)
+            self._update_minimap()
     
     def load_image(self, image_path: str) -> None:
         """Load image and get its dimensions"""
@@ -210,6 +227,7 @@ class InteractiveAnnotator:
             self.history_index -= 1
             state = self.history[self.history_index]
             self.gt_boxes = deepcopy(state.gt_boxes)
+            self.pred_boxes = deepcopy(state.pred_boxes)
             self.selected_box_id = state.selected_id
             self._update_display()
             self._notify_change()
@@ -222,6 +240,7 @@ class InteractiveAnnotator:
             self.history_index += 1
             state = self.history[self.history_index]
             self.gt_boxes = deepcopy(state.gt_boxes)
+            self.pred_boxes = deepcopy(state.pred_boxes)
             self.selected_box_id = state.selected_id
             self._update_display()
             self._notify_change()
@@ -229,12 +248,109 @@ class InteractiveAnnotator:
         return False
     
     def get_selected_box(self) -> Optional[BBox]:
-        """Get currently selected box"""
+        """Get currently selected box (must be editable)"""
         if self.selected_box_id:
+            # Check GT boxes
             for box in self.gt_boxes:
                 if box.id == self.selected_box_id:
-                    return box
+                    if getattr(box, 'editable', True):
+                        return box
+                    else:
+                        # Non-editable box cannot be selected
+                        self.selected_box_id = None
+                        return None
+            # Check Pred boxes
+            for box in self.pred_boxes:
+                if box.id == self.selected_box_id:
+                    if getattr(box, 'editable', True):
+                        return box
+                    else:
+                        self.selected_box_id = None
+                        return None
         return None
+    
+    def get_all_boxes(self) -> List[BBox]:
+        """Get all boxes (GT + Pred) for box list panel"""
+        return self.gt_boxes + self.pred_boxes
+    
+    def set_box_visible(self, box_id: str, visible: bool) -> None:
+        """Set visibility for a specific box"""
+        for box in self.gt_boxes:
+            if box.id == box_id:
+                box.visible = visible
+                self._update_display()
+                return
+        for box in self.pred_boxes:
+            if box.id == box_id:
+                box.visible = visible
+                self._update_display()
+                return
+    
+    def select_box_by_id(self, box_id: str) -> bool:
+        """Select a box by ID (only if editable)"""
+        # Check GT boxes
+        for box in self.gt_boxes:
+            if box.id == box_id:
+                if getattr(box, 'editable', True):
+                    self.selected_box_id = box_id
+                    self._update_display()
+                    return True
+                return False
+        # Check Pred boxes
+        for box in self.pred_boxes:
+            if box.id == box_id:
+                if getattr(box, 'editable', True):
+                    self.selected_box_id = box_id
+                    self._update_display()
+                    return True
+                return False
+        return False
+    
+    # ==================== One-Click Actions ====================
+    
+    def swap_editable(self) -> None:
+        """Swap editable status of all boxes
+        
+        All editable=True boxes become editable=False
+        All editable=False boxes become editable=True
+        """
+        for box in self.gt_boxes:
+            box.editable = not getattr(box, 'editable', True)
+        for box in self.pred_boxes:
+            box.editable = not getattr(box, 'editable', True)
+        
+        # Clear selection (selected box may no longer be editable)
+        self.selected_box_id = None
+        
+        self._save_history()
+        self._notify_change()
+        self._update_display()
+    
+    def clear_editable(self) -> None:
+        """Delete all editable boxes"""
+        # Remove all editable boxes
+        self.gt_boxes = [b for b in self.gt_boxes if not getattr(b, 'editable', True)]
+        self.pred_boxes = [b for b in self.pred_boxes if not getattr(b, 'editable', True)]
+        
+        # Clear selection
+        self.selected_box_id = None
+        
+        self._save_history()
+        self._notify_change()
+        self._update_display()
+    
+    def activate_reference(self) -> None:
+        """Make all non-editable boxes editable"""
+        for box in self.gt_boxes:
+            if not getattr(box, 'editable', True):
+                box.editable = True
+        for box in self.pred_boxes:
+            if not getattr(box, 'editable', True):
+                box.editable = True
+        
+        self._save_history()
+        self._notify_change()
+        self._update_display()
     
     # ==================== Zoom Methods ====================
     
@@ -341,12 +457,22 @@ class InteractiveAnnotator:
     def _get_zoom_focus_point(self) -> tuple:
         """Get the focus point for zooming (in image coordinates)
         
-        Always focuses on the center of the current view.
+        Priority:
+        1. If a box is selected, focus on the selected box center
+        2. Otherwise, focus on the center of the current view
         
         Returns:
-            (x, y) - center of current view in image coordinates
+            (x, y) - focus point in image coordinates
         """
-        # Always focus on current view center
+        # Check if a box is selected
+        selected_box = self.get_selected_box()
+        if selected_box:
+            # Focus on selected box center
+            cx = selected_box.x + selected_box.w / 2
+            cy = selected_box.y + selected_box.h / 2
+            return (cx, cy)
+        
+        # No selection - focus on current view center
         if self.zoom > 1.0:
             # View center in image coordinates
             cx = self.pan_x + self.view_width / (2 * self.zoom)
@@ -526,13 +652,14 @@ class InteractiveAnnotator:
     # ==================== Private Methods ====================
     
     def _save_history(self) -> None:
-        """Save current state to history"""
+        """Save current state to history (includes both gt_boxes and pred_boxes)"""
         # Remove any redo states
         self.history = self.history[:self.history_index + 1]
         
-        # Add new state
+        # Add new state (save both gt and pred boxes with all attributes)
         state = HistoryState(
             gt_boxes=deepcopy(self.gt_boxes),
+            pred_boxes=deepcopy(self.pred_boxes),
             selected_id=self.selected_box_id
         )
         self.history.append(state)
@@ -549,37 +676,53 @@ class InteractiveAnnotator:
             self.on_change(self.get_gt_boxes())
     
     def _update_display(self) -> None:
-        """Update SVG overlay content"""
+        """Update SVG overlay content
+        
+        Only renders boxes where:
+        - Global show flag is True (show_gt or show_pred)
+        - Individual box visible attribute is True
+        """
         if not self.image_component:
             return
         
         svg_parts = []
         
-        # Render GT boxes
+        # Render GT boxes (check both global flag and individual visible)
         if self.show_gt:
             for box in self.gt_boxes:
-                svg_parts.append(self._render_box(box))
+                if getattr(box, 'visible', True):
+                    svg_parts.append(self._render_box(box))
         
         # Render Pred boxes
         if self.show_pred:
             for box in self.pred_boxes:
-                svg_parts.append(self._render_box(box))
+                if getattr(box, 'visible', True):
+                    svg_parts.append(self._render_box(box))
         
-        # Render handles for selected box
+        # Render handles for selected box (only if editable and visible)
         selected_box = self.get_selected_box()
         if selected_box and self.show_gt:
-            svg_parts.append(self._render_handles(selected_box))
+            if getattr(selected_box, 'visible', True) and getattr(selected_box, 'editable', True):
+                svg_parts.append(self._render_handles(selected_box))
         
         self.image_component.set_content(''.join(svg_parts))
     
     def _render_box(self, box: BBox) -> str:
-        """Render a single bounding box as SVG"""
+        """Render a single bounding box as SVG
+        
+        - editable=True: solid line
+        - editable=False: dashed line
+        - Color is determined by source (GT=green, Pred=blue)
+        """
         is_selected = box.id == self.selected_box_id
         source = box.source.value if isinstance(box.source, BoxSource) else box.source
         
         color = self.COLORS[source]['selected' if is_selected else 'normal']
         stroke_width = 3 if is_selected else 2
-        dash_array = '' if source == 'gt' else '5,5'
+        
+        # Editable boxes use solid line, non-editable use dashed line
+        editable = getattr(box, 'editable', True)
+        dash_array = '' if editable else '5,5'
         
         # Box rectangle
         rect_attrs = f'x="{box.x}" y="{box.y}" width="{box.w}" height="{box.h}"'
@@ -590,21 +733,25 @@ class InteractiveAnnotator:
         svg = f'<rect {rect_attrs} {rect_style} data-box-id="{box.id}"/>'
         
         # Label text
-        if source == 'gt':
-            label = f"{box.class_id}"
-        else:
-            # For pred boxes, show class and confidence if available
-            label = f"{box.class_id}"
+        label = f"{box.class_id}"
         
-        # Background for label
+        # Label position (above the box, or inside if too close to top)
         label_x = box.x
-        label_y = box.y - 4
-        if label_y < 15:
-            label_y = box.y + 15
+        label_y = box.y - 6
+        if label_y < 18:
+            label_y = box.y + 18
         
-        svg += f'''<text x="{label_x + 2}" y="{label_y}" 
-            font-size="12" font-family="Arial" font-weight="bold"
-            fill="{color}" stroke="white" stroke-width="0.5">{label}</text>'''
+        # Calculate background width based on number of digits
+        bg_width = 20 if box.class_id < 10 else 28
+        
+        # Add background rectangle for better readability
+        svg += f'''<rect x="{label_x}" y="{label_y - 14}" width="{bg_width}" height="18" 
+              fill="white" fill-opacity="0.85" rx="2"/>'''
+        
+        # Label text with larger font
+        svg += f'''<text x="{label_x + 3}" y="{label_y}" 
+            font-size="16" font-family="Arial" font-weight="bold"
+            fill="{color}">{label}</text>'''
         
         return svg
     
@@ -906,7 +1053,10 @@ class InteractiveAnnotator:
         return x, y, w, h
     
     def _get_click_target(self, x: float, y: float) -> Tuple[str, Any]:
-        """Determine what was clicked: ('handle', name), ('box', BBox), or ('empty', None)"""
+        """Determine what was clicked: ('handle', name), ('box', BBox), or ('empty', None)
+        
+        Only returns editable boxes for selection.
+        """
         # Check handles first (if a box is selected)
         selected_box = self.get_selected_box()
         if selected_box:
@@ -915,9 +1065,17 @@ class InteractiveAnnotator:
                 return ('handle', handle)
         
         # Check GT boxes (reverse order for top-most first)
+        # Only return editable and visible boxes
         for box in reversed(self.gt_boxes):
-            if self._point_in_box(x, y, box):
-                return ('box', box)
+            if getattr(box, 'visible', True) and getattr(box, 'editable', True):
+                if self._point_in_box(x, y, box):
+                    return ('box', box)
+        
+        # Check Pred boxes (only if editable)
+        for box in reversed(self.pred_boxes):
+            if getattr(box, 'visible', True) and getattr(box, 'editable', True):
+                if self._point_in_box(x, y, box):
+                    return ('box', box)
         
         return ('empty', None)
     
@@ -1041,32 +1199,52 @@ class InteractiveAnnotator:
                 return
     
     def _cycle_selection(self) -> None:
-        """Cycle through GT boxes selection"""
-        if not self.gt_boxes:
+        """Cycle through editable boxes selection (both GT and Pred)"""
+        # Collect all editable boxes
+        editable_boxes = []
+        for box in self.gt_boxes:
+            if getattr(box, 'visible', True) and getattr(box, 'editable', True):
+                editable_boxes.append(box)
+        for box in self.pred_boxes:
+            if getattr(box, 'visible', True) and getattr(box, 'editable', True):
+                editable_boxes.append(box)
+        
+        if not editable_boxes:
+            self.selected_box_id = None
+            self._update_display()
             return
         
         if not self.selected_box_id:
             # Select first box
-            self.selected_box_id = self.gt_boxes[0].id
+            self.selected_box_id = editable_boxes[0].id
         else:
             # Find current index and move to next
             current_idx = -1
-            for i, box in enumerate(self.gt_boxes):
+            for i, box in enumerate(editable_boxes):
                 if box.id == self.selected_box_id:
                     current_idx = i
                     break
             
-            next_idx = (current_idx + 1) % len(self.gt_boxes)
-            self.selected_box_id = self.gt_boxes[next_idx].id
+            next_idx = (current_idx + 1) % len(editable_boxes)
+            self.selected_box_id = editable_boxes[next_idx].id
         
         self._update_display()
     
     def _delete_selected(self) -> None:
-        """Delete the selected box"""
+        """Delete the selected box (must be editable)"""
         if not self.selected_box_id:
             return
         
+        # Check if selected box is editable before deleting
+        selected_box = self.get_selected_box()
+        if not selected_box or not getattr(selected_box, 'editable', True):
+            return
+        
+        # Remove from GT boxes
         self.gt_boxes = [b for b in self.gt_boxes if b.id != self.selected_box_id]
+        # Remove from Pred boxes (in case it was moved there)
+        self.pred_boxes = [b for b in self.pred_boxes if b.id != self.selected_box_id]
+        
         self.selected_box_id = None
         
         self._save_history()
