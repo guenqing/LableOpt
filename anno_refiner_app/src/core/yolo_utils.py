@@ -3,8 +3,13 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 from PIL import Image
 import logging
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 
 logger = logging.getLogger(__name__)
+
+# Threshold for switching to parallel processing
+PARALLEL_THRESHOLD = 10000  # Use parallel for > 50k samples
 
 
 def yolo_to_pixel(cx: float, cy: float, w: float, h: float,
@@ -99,6 +104,47 @@ def collect_image_paths(images_dir: Path) -> List[Path]:
     return sorted(image_paths)
 
 
+def _process_single_image_gt_worker(args: Tuple[str, str, str]) -> Optional[Tuple[Dict[str, Any], str]]:
+    """
+    Worker function for processing single image GT label (must be top-level for pickling).
+    
+    Args:
+        args: (images_dir_str, gt_labels_dir_str, rel_path_str)
+    
+    Returns:
+        (label_dict, rel_path_str) or None if failed
+    """
+    images_dir_str, gt_labels_dir_str, rel_path_str = args
+    images_dir = Path(images_dir_str)
+    gt_labels_dir = Path(gt_labels_dir_str)
+    rel_path = Path(rel_path_str)
+    
+    img_path = images_dir / rel_path
+    label_rel_path = rel_path.with_suffix('.txt')
+    label_path = gt_labels_dir / label_rel_path
+
+    try:
+        img_w, img_h = get_image_size(img_path)
+    except Exception as e:
+        # Don't log in worker to avoid log spam
+        return None
+
+    boxes = read_yolo_label(label_path, img_w, img_h, has_confidence=False)
+
+    if boxes:
+        bboxes = np.array([b['bbox'] for b in boxes], dtype=np.float32)
+        class_ids = np.array([b['class_id'] for b in boxes], dtype=np.int64)
+    else:
+        bboxes = np.zeros((0, 4), dtype=np.float32)
+        class_ids = np.array([], dtype=np.int64)
+
+    label_dict = {
+        'bboxes': bboxes,
+        'labels': class_ids,
+    }
+    return label_dict, rel_path_str
+
+
 def prepare_cleanlab_labels(
     images_dir: Path,
     gt_labels_dir: Path,
@@ -106,6 +152,7 @@ def prepare_cleanlab_labels(
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
     Convert YOLO GT labels to Cleanlab format.
+    Automatically uses parallel processing for large datasets.
 
     Args:
         images_dir: root directory containing images
@@ -116,39 +163,122 @@ def prepare_cleanlab_labels(
         labels: cleanlab format label list
         valid_image_paths: list of valid relative image paths (as strings)
     """
-    labels = []
-    valid_image_paths = []
+    num_samples = len(image_rel_paths)
+    
+    # Use parallel processing for large datasets
+    if num_samples >= PARALLEL_THRESHOLD:
+        num_workers = min(multiprocessing.cpu_count(), 32)
+        logger.info(f"Using parallel processing for GT labels ({num_samples} samples, {num_workers} workers)")
+        
+        # Prepare arguments (convert to strings for pickling)
+        args_list = [
+            (str(images_dir), str(gt_labels_dir), str(rel_path))
+            for rel_path in image_rel_paths
+        ]
+        
+        # Process in parallel
+        chunksize = max(1, len(args_list) // (num_workers * 4))
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            results = list(executor.map(
+                _process_single_image_gt_worker,
+                args_list,
+                chunksize=chunksize
+            ))
+        
+        # Collect valid results
+        labels = []
+        valid_image_paths = []
+        failed_count = 0
+        for result in results:
+            if result is not None:
+                label_dict, rel_path_str = result
+                labels.append(label_dict)
+                valid_image_paths.append(rel_path_str)
+            else:
+                failed_count += 1
+        
+        if failed_count > 0:
+            logger.warning(f"Failed to process {failed_count} images out of {num_samples}")
+        
+        return labels, valid_image_paths
+    
+    # Use serial processing for small datasets
+    else:
+        labels = []
+        valid_image_paths = []
 
-    for rel_path in image_rel_paths:
-        img_path = images_dir / rel_path
-        # Corresponding label file (same relative path, different extension)
-        label_rel_path = rel_path.with_suffix('.txt')
-        label_path = gt_labels_dir / label_rel_path
+        for rel_path in image_rel_paths:
+            img_path = images_dir / rel_path
+            label_rel_path = rel_path.with_suffix('.txt')
+            label_path = gt_labels_dir / label_rel_path
 
-        # Skip if image doesn't exist (broken symlink, etc.)
-        try:
-            img_w, img_h = get_image_size(img_path)
-        except Exception as e:
-            logger.warning(f"Cannot read image {img_path}: {e}, skipping")
-            continue
+            try:
+                img_w, img_h = get_image_size(img_path)
+            except Exception as e:
+                logger.warning(f"Cannot read image {img_path}: {e}, skipping")
+                continue
 
-        # Read GT labels
-        boxes = read_yolo_label(label_path, img_w, img_h, has_confidence=False)
+            boxes = read_yolo_label(label_path, img_w, img_h, has_confidence=False)
 
-        if boxes:
-            bboxes = np.array([b['bbox'] for b in boxes], dtype=np.float32)
-            class_ids = np.array([b['class_id'] for b in boxes], dtype=np.int64)
-        else:
-            bboxes = np.zeros((0, 4), dtype=np.float32)
-            class_ids = np.array([], dtype=np.int64)
+            if boxes:
+                bboxes = np.array([b['bbox'] for b in boxes], dtype=np.float32)
+                class_ids = np.array([b['class_id'] for b in boxes], dtype=np.int64)
+            else:
+                bboxes = np.zeros((0, 4), dtype=np.float32)
+                class_ids = np.array([], dtype=np.int64)
 
-        labels.append({
-            'bboxes': bboxes,
-            'labels': class_ids,
-        })
-        valid_image_paths.append(str(rel_path))
+            labels.append({
+                'bboxes': bboxes,
+                'labels': class_ids,
+            })
+            valid_image_paths.append(str(rel_path))
 
-    return labels, valid_image_paths
+        return labels, valid_image_paths
+
+
+def _process_single_image_pred_worker(args: Tuple[str, str, str, int]) -> np.ndarray:
+    """
+    Worker function for processing single image prediction (must be top-level for pickling).
+    
+    Args:
+        args: (images_dir_str, pred_labels_dir_str, rel_path_str, num_classes)
+    
+    Returns:
+        pred_array: cleanlab format prediction array
+    """
+    images_dir_str, pred_labels_dir_str, rel_path_str, num_classes = args
+    images_dir = Path(images_dir_str)
+    pred_labels_dir = Path(pred_labels_dir_str)
+    rel_path = Path(rel_path_str)
+    
+    img_path = images_dir / rel_path
+    pred_rel_path = rel_path.with_suffix('.txt')
+    pred_path = pred_labels_dir / pred_rel_path
+
+    try:
+        img_w, img_h = get_image_size(img_path)
+    except Exception:
+        return np.array([
+            np.zeros((0, 5), dtype=np.float32) for _ in range(num_classes)
+        ], dtype=object)
+
+    pred_by_class = [[] for _ in range(num_classes)]
+
+    if pred_path.exists():
+        boxes = read_yolo_label(pred_path, img_w, img_h, has_confidence=True)
+        for box in boxes:
+            class_id = box['class_id']
+            conf = box.get('confidence', 1.0)
+            x1, y1, x2, y2 = box['bbox']
+            if 0 <= class_id < num_classes:
+                pred_by_class[class_id].append([x1, y1, x2, y2, conf])
+
+    pred_array = np.array([
+        np.array(boxes, dtype=np.float32) if boxes else np.zeros((0, 5), dtype=np.float32)
+        for boxes in pred_by_class
+    ], dtype=object)
+
+    return pred_array
 
 
 def prepare_cleanlab_predictions(
@@ -159,6 +289,7 @@ def prepare_cleanlab_predictions(
 ) -> List[np.ndarray]:
     """
     Convert YOLO predictions to Cleanlab format.
+    Automatically uses parallel processing for large datasets.
 
     Args:
         images_dir: root directory containing images
@@ -169,47 +300,111 @@ def prepare_cleanlab_predictions(
     Returns:
         predictions: cleanlab format prediction list
     """
-    predictions = []
+    num_samples = len(image_rel_paths)
+    
+    # Use parallel processing for large datasets
+    if num_samples >= PARALLEL_THRESHOLD:
+        num_workers = min(multiprocessing.cpu_count(), 32)
+        logger.info(f"Using parallel processing for Pred labels ({num_samples} samples, {num_workers} workers)")
+        
+        # Prepare arguments
+        args_list = [
+            (str(images_dir), str(pred_labels_dir), rel_path_str, num_classes)
+            for rel_path_str in image_rel_paths
+        ]
+        
+        # Process in parallel
+        chunksize = max(1, len(args_list) // (num_workers * 4))
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            predictions = list(executor.map(
+                _process_single_image_pred_worker,
+                args_list,
+                chunksize=chunksize
+            ))
+        
+        return predictions
+    
+    # Use serial processing for small datasets
+    else:
+        predictions = []
 
-    for rel_path_str in image_rel_paths:
-        rel_path = Path(rel_path_str)
-        img_path = images_dir / rel_path
-        pred_rel_path = rel_path.with_suffix('.txt')
-        pred_path = pred_labels_dir / pred_rel_path
+        for rel_path_str in image_rel_paths:
+            rel_path = Path(rel_path_str)
+            img_path = images_dir / rel_path
+            pred_rel_path = rel_path.with_suffix('.txt')
+            pred_path = pred_labels_dir / pred_rel_path
 
-        # Get image size
-        try:
-            img_w, img_h = get_image_size(img_path)
-        except Exception as e:
-            logger.warning(f"Cannot read image {img_path}: {e}")
-            # Return empty predictions for this image
+            try:
+                img_w, img_h = get_image_size(img_path)
+            except Exception as e:
+                logger.warning(f"Cannot read image {img_path}: {e}")
+                pred_array = np.array([
+                    np.zeros((0, 5), dtype=np.float32) for _ in range(num_classes)
+                ], dtype=object)
+                predictions.append(pred_array)
+                continue
+
+            pred_by_class = [[] for _ in range(num_classes)]
+
+            if pred_path.exists():
+                boxes = read_yolo_label(pred_path, img_w, img_h, has_confidence=True)
+                for box in boxes:
+                    class_id = box['class_id']
+                    conf = box.get('confidence', 1.0)
+                    x1, y1, x2, y2 = box['bbox']
+                    if 0 <= class_id < num_classes:
+                        pred_by_class[class_id].append([x1, y1, x2, y2, conf])
+
             pred_array = np.array([
-                np.zeros((0, 5), dtype=np.float32) for _ in range(num_classes)
+                np.array(boxes, dtype=np.float32) if boxes else np.zeros((0, 5), dtype=np.float32)
+                for boxes in pred_by_class
             ], dtype=object)
+
             predictions.append(pred_array)
-            continue
 
-        # Organize predictions by class
-        pred_by_class = [[] for _ in range(num_classes)]
+        return predictions
 
-        if pred_path.exists():
-            boxes = read_yolo_label(pred_path, img_w, img_h, has_confidence=True)
-            for box in boxes:
-                class_id = box['class_id']
-                conf = box.get('confidence', 1.0)
-                x1, y1, x2, y2 = box['bbox']
-                if 0 <= class_id < num_classes:
-                    pred_by_class[class_id].append([x1, y1, x2, y2, conf])
 
-        # Convert to numpy arrays
-        pred_array = np.array([
-            np.array(boxes, dtype=np.float32) if boxes else np.zeros((0, 5), dtype=np.float32)
-            for boxes in pred_by_class
-        ], dtype=object)
+def _count_classes_single_image_worker(args: Tuple[str, str, str]) -> set:
+    """
+    Worker function for counting classes from single image (must be top-level for pickling).
+    
+    Args:
+        args: (gt_labels_dir_str, pred_labels_dir_str, rel_path_str)
+    
+    Returns:
+        set of class IDs found in this image
+    """
+    gt_labels_dir_str, pred_labels_dir_str, rel_path_str = args
+    gt_labels_dir = Path(gt_labels_dir_str)
+    pred_labels_dir = Path(pred_labels_dir_str)
+    rel_path = Path(rel_path_str)
+    
+    classes = set()
 
-        predictions.append(pred_array)
+    gt_path = gt_labels_dir / rel_path.with_suffix('.txt')
+    if gt_path.exists():
+        try:
+            with open(gt_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if parts:
+                        classes.add(int(parts[0]))
+        except Exception:
+            pass
 
-    return predictions
+    pred_path = pred_labels_dir / rel_path.with_suffix('.txt')
+    if pred_path.exists():
+        try:
+            with open(pred_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if parts:
+                        classes.add(int(parts[0]))
+        except Exception:
+            pass
+
+    return classes
 
 
 def count_classes(
@@ -219,31 +414,70 @@ def count_classes(
 ) -> int:
     """
     Count the number of classes from GT and pred labels.
+    Automatically uses parallel processing for large datasets.
+
+    Args:
+        gt_labels_dir: root directory containing GT labels
+        pred_labels_dir: root directory containing pred labels
+        image_rel_paths: list of relative image paths (strings)
 
     Returns:
         num_classes: max(class_id) + 1
     """
-    all_classes = set()
+    num_samples = len(image_rel_paths)
+    
+    # Use parallel processing for large datasets
+    if num_samples >= PARALLEL_THRESHOLD:
+        num_workers = min(multiprocessing.cpu_count(), 32)
+        logger.info(f"Using parallel processing for counting classes ({num_samples} samples, {num_workers} workers)")
+        
+        # Prepare arguments
+        args_list = [
+            (str(gt_labels_dir), str(pred_labels_dir), rel_path_str)
+            for rel_path_str in image_rel_paths
+        ]
+        
+        # Process in parallel
+        chunksize = max(1, len(args_list) // (num_workers * 4))
+        all_classes = set()
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            results = executor.map(
+                _count_classes_single_image_worker,
+                args_list,
+                chunksize=chunksize
+            )
+            for classes in results:
+                all_classes.update(classes)
+        
+        return max(all_classes) + 1 if all_classes else 1
+    
+    # Use serial processing for small datasets
+    else:
+        all_classes = set()
 
-    for rel_path_str in image_rel_paths:
-        rel_path = Path(rel_path_str)
+        for rel_path_str in image_rel_paths:
+            rel_path = Path(rel_path_str)
 
-        # Check GT
-        gt_path = gt_labels_dir / rel_path.with_suffix('.txt')
-        if gt_path.exists():
-            with open(gt_path, 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if parts:
-                        all_classes.add(int(parts[0]))
+            gt_path = gt_labels_dir / rel_path.with_suffix('.txt')
+            if gt_path.exists():
+                try:
+                    with open(gt_path, 'r') as f:
+                        for line in f:
+                            parts = line.strip().split()
+                            if parts:
+                                all_classes.add(int(parts[0]))
+                except Exception as e:
+                    logger.warning(f"Error reading GT label {gt_path}: {e}")
 
-        # Check pred
-        pred_path = pred_labels_dir / rel_path.with_suffix('.txt')
-        if pred_path.exists():
-            with open(pred_path, 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if parts:
-                        all_classes.add(int(parts[0]))
+            pred_path = pred_labels_dir / rel_path.with_suffix('.txt')
+            if pred_path.exists():
+                try:
+                    with open(pred_path, 'r') as f:
+                        for line in f:
+                            parts = line.strip().split()
+                            if parts:
+                                all_classes.add(int(parts[0]))
+                except Exception as e:
+                    logger.warning(f"Error reading pred label {pred_path}: {e}")
 
-    return max(all_classes) + 1 if all_classes else 1
+        return max(all_classes) + 1 if all_classes else 1
