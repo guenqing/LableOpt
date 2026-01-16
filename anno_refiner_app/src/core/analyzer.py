@@ -2,13 +2,16 @@ from typing import List, Dict, Callable, Optional, Any
 from pathlib import Path
 import numpy as np
 import logging
+import time
 
 from cleanlab.object_detection.rank import (
     get_label_quality_scores,
     compute_overlooked_box_scores,
     compute_swap_box_scores,
-    compute_badloc_box_scores
+    compute_badloc_box_scores,
+    _get_valid_inputs_for_compute_scores
 )
+from cleanlab.internal.constants import ALPHA
 
 from ..models import IssueItem, IssueType
 from .yolo_utils import (
@@ -48,12 +51,15 @@ class CleanlabAnalyzer:
 
     def prepare_data(self):
         """Prepare data: format conversion"""
+        step_start = time.time()
         self._report_progress("Collecting image paths...", 0.05)
 
         # Collect all image paths from nested structure
         all_image_rel_paths = collect_image_paths(self.images_path)
-        logger.info(f"Found {len(all_image_rel_paths)} images in {self.images_path}")
+        step_time = time.time() - step_start
+        logger.info(f"Found {len(all_image_rel_paths)} images in {self.images_path} (耗时: {step_time:.3f}s)")
 
+        step_start = time.time()
         self._report_progress("Converting GT labels...", 0.1)
 
         # Convert GT labels to cleanlab format
@@ -62,8 +68,10 @@ class CleanlabAnalyzer:
             self.gt_labels_path,
             all_image_rel_paths
         )
-        logger.info(f"Prepared {len(self.labels)} valid samples")
+        step_time = time.time() - step_start
+        logger.info(f"Prepared {len(self.labels)} valid samples (耗时: {step_time:.3f}s)")
 
+        step_start = time.time()
         self._report_progress("Counting classes...", 0.2)
 
         # Count classes
@@ -72,8 +80,10 @@ class CleanlabAnalyzer:
             self.pred_labels_path,
             self.image_paths
         )
-        logger.info(f"Detected {self.num_classes} classes")
+        step_time = time.time() - step_start
+        logger.info(f"Detected {self.num_classes} classes (耗时: {step_time:.3f}s)")
 
+        step_start = time.time()
         self._report_progress("Converting Pred labels...", 0.3)
 
         # Convert predictions to cleanlab format
@@ -83,6 +93,8 @@ class CleanlabAnalyzer:
             self.image_paths,
             self.num_classes
         )
+        step_time = time.time() - step_start
+        logger.info(f"Pred labels conversion complete (耗时: {step_time:.3f}s)")
 
         self._report_progress("Data preparation complete", 0.4)
 
@@ -93,30 +105,51 @@ class CleanlabAnalyzer:
         Returns:
             IssueItem lists grouped by issue type
         """
+        # Pre-compute auxiliary inputs to avoid redundant computation
+        # This reduces computation time by sharing similarity matrices and other
+        # intermediate results across the three score computation functions
+        step_start = time.time()
+        self._report_progress("Preparing auxiliary inputs...", 0.45)
+        
+        auxiliary_inputs = _get_valid_inputs_for_compute_scores(
+            alpha=ALPHA,
+            labels=self.labels,
+            predictions=self.predictions
+        )
+        prep_time = time.time() - step_start
+        logger.info(f"Auxiliary inputs prepared (耗时: {prep_time:.3f}s)")
+
+        step_start = time.time()
         self._report_progress("Computing overlooked scores...", 0.5)
 
-        # Compute overlooked scores
+        # Compute overlooked scores using auxiliary inputs
         overlooked_scores = compute_overlooked_box_scores(
-            labels=self.labels,
-            predictions=self.predictions
+            auxiliary_inputs=auxiliary_inputs
         )
+        step_time = time.time() - step_start
+        logger.info(f"Overlooked scores computed (耗时: {step_time:.3f}s)")
 
+        step_start = time.time()
         self._report_progress("Computing swap scores...", 0.6)
 
-        # Compute swap scores
+        # Compute swap scores using auxiliary inputs
         swap_scores = compute_swap_box_scores(
-            labels=self.labels,
-            predictions=self.predictions
+            auxiliary_inputs=auxiliary_inputs
         )
+        step_time = time.time() - step_start
+        logger.info(f"Swap scores computed (耗时: {step_time:.3f}s)")
 
+        step_start = time.time()
         self._report_progress("Computing bad location scores...", 0.7)
 
-        # Compute bad location scores
+        # Compute bad location scores using auxiliary inputs
         badloc_scores = compute_badloc_box_scores(
-            labels=self.labels,
-            predictions=self.predictions
+            auxiliary_inputs=auxiliary_inputs
         )
+        step_time = time.time() - step_start
+        logger.info(f"Bad location scores computed (耗时: {step_time:.3f}s)")
 
+        step_start = time.time()
         self._report_progress("Ranking issues...", 0.8)
 
         results = {
@@ -189,6 +222,8 @@ class CleanlabAnalyzer:
                     ))
         badloc_items.sort(key=lambda x: x.score)
         results[IssueType.BAD_LOCATED] = badloc_items[:top_k]
+        ranking_time = time.time() - step_start
+        logger.info(f"Issues ranked (耗时: {ranking_time:.3f}s)")
 
         self._report_progress("Analysis complete", 1.0)
 

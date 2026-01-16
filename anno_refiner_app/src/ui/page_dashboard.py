@@ -4,6 +4,7 @@ Dashboard page - Analysis control panel with visualization
 import asyncio
 import tempfile
 import os
+import time
 from pathlib import Path
 from nicegui import ui, app
 import matplotlib
@@ -286,6 +287,9 @@ class DashboardPage:
             ui.notify('Please fix path errors before running analysis', type='negative')
             return
         
+        # Record start time
+        start_time = time.time()
+        
         self.run_button.disable()
         self.progress_bar.visible = True
         app_state.is_analyzing = True
@@ -318,6 +322,16 @@ class DashboardPage:
             app_state.results.swapped = results[IssueType.SWAPPED]
             app_state.results.bad_located = results[IssueType.BAD_LOCATED]
             
+            # Calculate elapsed time
+            elapsed_time = time.time() - start_time
+            minutes = int(elapsed_time // 60)
+            seconds = int(elapsed_time % 60)
+            
+            if minutes > 0:
+                time_str = f'{minutes}m {seconds}s'
+            else:
+                time_str = f'{seconds:.3f}s'
+            
             app_state.analysis_complete = True
             self._update_progress('Analysis complete!', 1.0)
             self._update_results_display()
@@ -329,9 +343,23 @@ class DashboardPage:
             n_overlooked = len(app_state.results.overlooked)
             n_swapped = len(app_state.results.swapped)
             n_badloc = len(app_state.results.bad_located)
-            ui.notify(f'Analysis complete: {n_overlooked} overlooked, {n_swapped} swapped, {n_badloc} bad located', type='positive')
+            ui.notify(
+                f'Analysis complete: {n_overlooked} overlooked, {n_swapped} swapped, {n_badloc} bad located',
+                type='positive'
+            )
+            
+            # Log total elapsed time
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f'Total analysis time: {elapsed_time:.3f} seconds ({time_str})')
             
         except Exception as ex:
+            # Calculate elapsed time even on error
+            elapsed_time = time.time() - start_time
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f'Analysis failed after {elapsed_time:.3f} seconds: {ex}')
+            
             ui.notify(f'Analysis failed: {ex}', type='negative')
             import traceback
             traceback.print_exc()
