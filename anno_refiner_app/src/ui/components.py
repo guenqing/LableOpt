@@ -177,8 +177,10 @@ class InteractiveAnnotator:
                     ).classes('block')
         
         # Load current image into minimap if already loaded
-        if self.image_path:
+        if self.image_path and self.image_width > 0 and self.image_height > 0:
             self.minimap_component.set_source(self.image_path)
+            # Set explicit dimensions for the minimap image element
+            self.minimap_component.style(f'width: {self.image_width}px; height: {self.image_height}px; display: block;')
             self._update_minimap()
     
     def load_image(self, image_path: str) -> None:
@@ -191,9 +193,13 @@ class InteractiveAnnotator:
             self.image_width, self.image_height = get_image_size(path)
             if self.image_component:
                 self.image_component.set_source(image_path)
+                # Set explicit dimensions for the image element so transform works correctly
+                self.image_component.style(f'width: {self.image_width}px; height: {self.image_height}px; display: block;')
             # Also load into minimap
             if hasattr(self, 'minimap_component') and self.minimap_component:
                 self.minimap_component.set_source(image_path)
+                # Set explicit dimensions for the minimap image element
+                self.minimap_component.style(f'width: {self.image_width}px; height: {self.image_height}px; display: block;')
             # Reset zoom when loading new image
             self.reset_zoom()
         else:
@@ -576,33 +582,38 @@ class InteractiveAnnotator:
         
         The key insight: pan_x and pan_y are in IMAGE coordinates (not display coordinates).
         pan_x and pan_y represent the top-left corner of the visible viewport in image coordinates.
-        At 1x zoom, the image is displayed with scale_1x to fit the container.
+        At 1x zoom, the image is displayed with scale_1x to fit the container and centered.
         At zoom>1, we scale by zoom, and translate to show the region starting from (pan_x, pan_y).
         
         CSS transforms are applied right-to-left, so:
         transform: translate(x, y) scale(z) means: first scale, then translate
         
         Strategy:
-        1. Scale the image by zoom (in 1x display space, image becomes image_width*zoom*scale_1x x image_height*zoom*scale_1x)
-        2. Translate so that point (pan_x, pan_y) in image coordinates aligns with the viewer's top-left corner
-           (accounting for the 1x display offset)
+        1. Always apply transform to scale and center the image (even at 1x zoom)
+        2. At 1x zoom: scale by scale_1x and center the image
+        3. At zoom>1: scale by zoom*scale_1x, and translate to show the region starting from (pan_x, pan_y)
         """
         if not hasattr(self, 'transform_container') or not self.transform_container:
             return
         
+        if self.image_width <= 0 or self.image_height <= 0:
+            return
+        
+        # Get scale at 1x zoom
+        scale_1x = self._get_viewer_scale_1x()
+        
+        # Calculate display offset at 1x (for centering when aspect ratio differs)
+        display_width_1x = self.image_width * scale_1x
+        display_height_1x = self.image_height * scale_1x
+        display_x_1x = (self.view_width - display_width_1x) / 2
+        display_y_1x = (self.view_height - display_height_1x) / 2
+        
         if self.zoom <= 1.0:
-            # At 1x zoom, no transform needed
-            self.transform_container.style('transform: none;')
+            # At 1x zoom, scale and center the image
+            transform = f'translate({display_x_1x}px, {display_y_1x}px) scale({scale_1x})'
+            self.transform_container.style(f'transform: {transform}; transform-origin: 0 0;')
         else:
-            # Get scale at 1x zoom
-            scale_1x = self._get_viewer_scale_1x()
-            
-            # Calculate display offset at 1x (for centering when aspect ratio differs)
-            display_width_1x = self.image_width * scale_1x
-            display_height_1x = self.image_height * scale_1x
-            display_x_1x = (self.view_width - display_width_1x) / 2
-            display_y_1x = (self.view_height - display_height_1x) / 2
-            
+            # At zoom > 1x, scale by zoom and translate to show the panned region
             # CSS applies transforms right-to-left, so we write: translate then scale
             # This means: first scale, then translate
             # We want: point (pan_x, pan_y) in image coordinates to be at the top-left of the visible area
@@ -613,7 +624,7 @@ class InteractiveAnnotator:
             translate_x = display_x_1x - self.pan_x * scale_1x * self.zoom
             translate_y = display_y_1x - self.pan_y * scale_1x * self.zoom
             
-            transform = f'translate({translate_x}px, {translate_y}px) scale({self.zoom})'
+            transform = f'translate({translate_x}px, {translate_y}px) scale({self.zoom * scale_1x})'
             self.transform_container.style(f'transform: {transform}; transform-origin: 0 0;')
         
         # Update minimap viewport indicator
@@ -649,9 +660,31 @@ class InteractiveAnnotator:
         return (display_x, display_y, display_width, display_height)
     
     def _update_minimap(self) -> None:
-        """Update minimap (no viewport indicator - removed for simplicity)"""
+        """Update minimap transform to scale and center the image"""
         if not hasattr(self, 'minimap_component') or not self.minimap_component:
             return
+        if not hasattr(self, 'minimap_transform_container') or not self.minimap_transform_container:
+            return
+        if self.image_width <= 0 or self.image_height <= 0:
+            return
+        
+        # Calculate scale to fit image in minimap container while maintaining aspect ratio
+        scale_x = self.minimap_width / self.image_width
+        scale_y = self.minimap_height / self.image_height
+        scale = min(scale_x, scale_y)  # Use smaller scale to fit both dimensions
+        
+        # Calculate actual displayed size
+        display_width = self.image_width * scale
+        display_height = self.image_height * scale
+        
+        # Center the image in the minimap container
+        display_x = (self.minimap_width - display_width) / 2
+        display_y = (self.minimap_height - display_height) / 2
+        
+        # Apply transform to scale and center the image
+        transform = f'translate({display_x}px, {display_y}px) scale({scale})'
+        self.minimap_transform_container.style(f'transform: {transform}; transform-origin: 0 0;')
+        
         # No overlay needed - Navigator is used only for click-to-navigate
         self.minimap_component.set_content('')
     
