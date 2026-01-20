@@ -124,7 +124,8 @@ class AnnotatorPage:
             # Create annotator (Viewer only, Navigator created separately)
             self.annotator = InteractiveAnnotator(
                 on_change=self._on_boxes_changed,
-                on_zoom_change=self._on_zoom_changed
+                on_zoom_change=self._on_zoom_changed,
+                on_display_change=self._on_display_change_from_annotator
             )
             # Create Viewer without Navigator (navigator_container=None means no navigator here)
             self.annotator.create_ui(viewer_container, fixed_width=900, fixed_height=600)
@@ -339,7 +340,12 @@ class AnnotatorPage:
                         ui.label('Tab - Cycle selection')
                         ui.label('Del/Backspace - Delete box')
                         ui.label('Arrow keys - Move box')
-                        ui.label('q/w/e/r - Set class 0/1/2/3')
+                        ui.label('1/2/3/4 - Set class 0/1/2/3')
+                        ui.label('q - Toggle Show GT')
+                        ui.label('w - Toggle Show Pred')
+                        ui.label('e - Swap Editable')
+                        ui.label('r - Clear Editable')
+                        ui.label('t - Activate Reference')
                         ui.label('Ctrl+Z/Y - Undo/Redo')
                         ui.label('= / - - Zoom in/out')
                         ui.label('0 - Reset zoom')
@@ -373,14 +379,16 @@ class AnnotatorPage:
         self.current_gt_boxes = self.annotator.get_gt_boxes()
         self.boxes_modified = False
         
+        # Auto-focus on boxes after loading image and boxes
+        # auto_focus_boxes() will call on_zoom_change callback to update UI
+        if self.annotator.image_width > 0 and self.annotator.image_height > 0:
+            self.annotator.auto_focus_boxes()
+        
         # Update navigation buttons
         self._update_nav_buttons()
         
         # Update box list panel
         self._update_box_list()
-        
-        # Reset zoom display
-        self._on_zoom_changed(1.0)
     
     def _update_header_info(self, item: IssueItem, idx: int):
         """Update header labels"""
@@ -480,12 +488,19 @@ class AnnotatorPage:
         self._update_box_list()
     
     def _on_display_change(self, e=None):
-        """Handle display option change"""
+        """Handle display option change from UI checkbox"""
         if self.annotator:
             self.annotator.set_display_options(
                 self.show_gt_checkbox.value,
                 self.show_pred_checkbox.value
             )
+    
+    def _on_display_change_from_annotator(self, show_gt: bool, show_pred: bool):
+        """Handle display option change from annotator (e.g., keyboard shortcut)"""
+        if self.show_gt_checkbox:
+            self.show_gt_checkbox.value = show_gt
+        if self.show_pred_checkbox:
+            self.show_pred_checkbox.value = show_pred
     
     def _on_zoom_changed(self, zoom: float):
         """Handle zoom change from annotator"""

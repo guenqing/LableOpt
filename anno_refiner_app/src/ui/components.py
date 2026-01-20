@@ -44,14 +44,17 @@ class InteractiveAnnotator:
     ZOOM_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     
     def __init__(self, on_change: Callable[[List[BBox]], None] = None,
-                 on_zoom_change: Callable[[float], None] = None):
+                 on_zoom_change: Callable[[float], None] = None,
+                 on_display_change: Callable[[bool, bool], None] = None):
         """
         Args:
             on_change: Callback when GT boxes change
             on_zoom_change: Callback when zoom level changes
+            on_display_change: Callback when display options change (show_gt, show_pred)
         """
         self.on_change = on_change
         self.on_zoom_change = on_zoom_change
+        self.on_display_change = on_display_change
         
         # State
         self.image_path: Optional[str] = None
@@ -202,6 +205,8 @@ class InteractiveAnnotator:
                 self.minimap_component.style(f'width: {self.image_width}px; height: {self.image_height}px; display: block;')
             # Reset zoom when loading new image
             self.reset_zoom()
+            # Reset current class to 0 for new boxes
+            self.current_class = 0
         else:
             logger.warning(f"Image not found: {image_path}")
             self.image_width = 0
@@ -563,6 +568,72 @@ class InteractiveAnnotator:
     def zoom_out(self) -> None:
         """Zoom out by 1 level"""
         self.set_zoom(self.zoom - 1)
+    
+    def auto_focus_boxes(self) -> None:
+        """Automatically set zoom and pan to focus on all boxes (GT + Pred)
+        
+        Calculates the union of all boxes and sets the optimal zoom level and pan
+        position to show all boxes in the viewport.
+        """
+        # Collect all boxes
+        all_boxes = self.gt_boxes + self.pred_boxes
+        if not all_boxes:
+            return
+        
+        # Calculate union of all boxes
+        min_x = min(box.x for box in all_boxes)
+        min_y = min(box.y for box in all_boxes)
+        max_x = max(box.x + box.w for box in all_boxes)
+        max_y = max(box.y + box.h for box in all_boxes)
+        
+        # Box dimensions
+        box_width = max_x - min_x
+        box_height = max_y - min_y
+        
+        if box_width <= 0 or box_height <= 0:
+            return
+        
+        # Get scale at 1x zoom
+        scale_1x = self._get_viewer_scale_1x()
+        if scale_1x <= 0:
+            return
+        
+        # Calculate optimal zoom level
+        # At zoom level Z, visible area in image coords: view_width/(Z*scale_1x) x view_height/(Z*scale_1x)
+        # We want: visible_width >= box_width and visible_height >= box_height
+        # So: Z <= view_width/(box_width*scale_1x) and Z <= view_height/(box_height*scale_1x)
+        zoom_x = self.view_width / (box_width * scale_1x)
+        zoom_y = self.view_height / (box_height * scale_1x)
+        optimal_zoom = min(zoom_x, zoom_y)
+        
+        # Round down to nearest integer and clamp to available zoom levels
+        optimal_zoom = max(1, min(int(optimal_zoom), max(self.ZOOM_LEVELS)))
+        
+        # Calculate center of boxes
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        
+        # Set zoom
+        self.zoom = float(optimal_zoom)
+        
+        # Calculate pan to center the boxes
+        # At zoom Z, visible area in image coords: view_width/(Z*scale_1x) x view_height/(Z*scale_1x)
+        visible_w = self.view_width / (self.zoom * scale_1x)
+        visible_h = self.view_height / (self.zoom * scale_1x)
+        
+        # Set pan so that center point is at the center of viewport
+        self.pan_x = center_x - visible_w / 2
+        self.pan_y = center_y - visible_h / 2
+        
+        # Constrain pan to keep image visible
+        self._constrain_pan()
+        
+        # Apply transform and update UI
+        self._apply_transform()
+        self._update_scrollbars()
+        
+        if self.on_zoom_change:
+            self.on_zoom_change(self.zoom)
     
     def _get_viewer_scale_1x(self) -> float:
         """Get the scale factor at 1x zoom (when image fits in viewer with aspect ratio preserved)
@@ -954,9 +1025,9 @@ class InteractiveAnnotator:
                 # Deselect
                 self.selected_box_id = None
                 self._update_display()
-            elif self.zoom <= 1.0:
-                # Start creating new box (only in 1x zoom)
-                # In zoomed mode, use scrollbars to pan instead of drag (drag has coordinate issues)
+            else:
+                # Start creating new box (works at any zoom level)
+                # interactive_image provides image_x/image_y in image coordinates, unaffected by CSS transform
                 self.drag_mode = 'create'
                 self.drag_start_x = x
                 self.drag_start_y = y
@@ -1262,11 +1333,40 @@ class InteractiveAnnotator:
             self._delete_selected()
             return
         
+        # Display toggle shortcuts (without modifiers)
+        if not e.modifiers.ctrl and not e.modifiers.alt and not e.modifiers.shift:
+            if key_name.lower() == 'q':
+                # Toggle Show GT
+                self.show_gt = not self.show_gt
+                self._update_display()
+                if self.on_display_change:
+                    self.on_display_change(self.show_gt, self.show_pred)
+                return
+            if key_name.lower() == 'w':
+                # Toggle Show Pred
+                self.show_pred = not self.show_pred
+                self._update_display()
+                if self.on_display_change:
+                    self.on_display_change(self.show_gt, self.show_pred)
+                return
+            if key_name.lower() == 'e':
+                # Swap Editable
+                self.swap_editable()
+                return
+            if key_name.lower() == 'r':
+                # Clear Editable
+                self.clear_editable()
+                return
+            if key_name.lower() == 't':
+                # Activate Reference
+                self.activate_reference()
+                return
+        
         # Class change shortcuts (without modifiers except shift)
         if not e.modifiers.ctrl and not e.modifiers.alt:
-            class_keys = {'q': 0, 'w': 1, 'e': 2, 'r': 3}
-            if key_name.lower() in class_keys:
-                self._change_class(class_keys[key_name.lower()])
+            class_keys = {'1': 0, '2': 1, '3': 2, '4': 3, 'Digit1': 0, 'Digit2': 1, 'Digit3': 2, 'Digit4': 3}
+            if key_name in class_keys:
+                self._change_class(class_keys[key_name])
                 return
         
         # Box adjustment shortcuts (only when box is selected)

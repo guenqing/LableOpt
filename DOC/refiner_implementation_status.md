@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-01-16
 > 
-> 最新更新: 添加Output Path功能，修复选择逻辑，优化文件保存机制
+> 最新更新: 修复放大状态下创建标注框功能，实现自动聚焦功能，优化快捷键布局
 
 ## 系统功能与逻辑概述
 
@@ -509,7 +509,7 @@ def _on_back(self):
 - 点击框: 选中框 (显示 8 个控制点)
 - 拖拽框: 移动框
 - 拖拽控制点: 调整大小 (4 角 + 4 边)
-- 空白区域拖拽: 创建新框
+- 空白区域拖拽: 创建新框 (支持任意缩放级别，不再限制在1x)
 
 **键盘快捷键**:
 ```
@@ -523,10 +523,19 @@ def _on_back(self):
 │  -            缩小一级                                   │
 │  0            重置到 1x                                  │
 │                                                          │
+│  显示控制                                                │
+│  q            切换 Show GT                               │
+│  w            切换 Show Pred                             │
+│                                                          │
+│  框操作                                                  │
+│  e            交换可编辑状态 (Swap Editable)             │
+│  r            清除可编辑框 (Clear Editable)              │
+│  t            激活参照框 (Activate Reference)            │
+│                                                          │
 │  编辑                                                    │
 │  Del/Backspace  删除选中框                              │
 │  Arrow Keys    移动选中框 (1px, Shift=10px)             │
-│  q/w/e/r       修改类别为 0/1/2/3                       │
+│  1/2/3/4       修改类别为 0/1/2/3                       │
 │  a/s/d/f       边框向外扩展 (Shift 反向)                 │
 │  z/x/c/v       角向外扩展 (Shift 反向)                  │
 │  Ctrl+Z/Y      撤销/重做                                │
@@ -560,6 +569,38 @@ def activate_reference(self):
 - **Swap Editable**: 当 Pred 框质量更好时，交换角色进行编辑
 - **Clear Editable**: 快速删除所有 GT 框，重新标注
 - **Activate Reference**: 将 Pred 框合并到 GT，用于补充漏标
+
+#### 放大状态下创建框
+
+**修复内容**:
+- 移除了创建框功能在放大状态下的限制
+- 现在可以在任意缩放级别（1x-10x）下通过鼠标拖拽创建标注框
+- `interactive_image` 组件提供的 `image_x/image_y` 已经是图像坐标系坐标（不受CSS transform影响），可以直接使用
+
+**实现细节**:
+- 在 `_on_mouse_down` 方法中，移除了 `elif self.zoom <= 1.0:` 的条件限制
+- 空白区域拖拽时，无论当前缩放级别如何，都可以创建新框
+
+#### 显示选项同步
+
+**功能**:
+- 通过快捷键 `q`/`w` 切换 Show GT/Pred 时，UI上的checkbox会自动同步更新
+- 通过UI checkbox切换时，显示状态也会同步更新
+
+**实现**:
+- 添加 `on_display_change` 回调机制
+- 快捷键切换时调用回调更新checkbox状态
+- UI checkbox变化时调用 `set_display_options` 更新显示状态
+
+#### 新框类别默认值
+
+**修复内容**:
+- 在加载新图片时，自动重置 `current_class` 为 0
+- 确保新创建的框默认使用类别 0，而不是之前设置的类别
+
+**实现**:
+- 在 `load_image()` 方法中，加载图片后重置 `current_class = 0`
+- 避免因之前按过类别快捷键（1/2/3/4）而影响新图片的默认类别
 
 ---
 
@@ -868,6 +909,52 @@ def set_zoom(self, zoom: float, focus_point: tuple = None):
 - **功能**: 点击 Navigator 任意位置，Viewer 快速定位到该位置
 - **实现**: 使用 `interactive_image` 组件，坐标直接映射到图像坐标
 - **特点**: 不显示视野框，简化交互，避免坐标换算问题
+
+#### 自动聚焦功能
+
+系统在加载图片和标注框后，会自动计算并设置最合适的初始视野中心和放大倍率，直达最方便标注的状态。
+
+**实现原理**:
+
+```python
+def auto_focus_boxes(self) -> None:
+    """根据GT和Pred框的并集，自动设置视野中心和放大倍率"""
+    # 1. 计算所有框的并集
+    min_x = min(所有框的x)
+    min_y = min(所有框的y)
+    max_x = max(所有框的x+w)
+    max_y = max(所有框的y+h)
+    
+    # 2. 计算框的尺寸
+    box_width = max_x - min_x
+    box_height = max_y - min_y
+    
+    # 3. 计算最优放大倍率（向下取整）
+    # 在zoom级别Z下，可见区域: view_width/(Z*scale_1x) x view_height/(Z*scale_1x)
+    # 需要: visible_width >= box_width 且 visible_height >= box_height
+    zoom_x = view_width / (box_width * scale_1x)
+    zoom_y = view_height / (box_height * scale_1x)
+    optimal_zoom = floor(min(zoom_x, zoom_y))  # 向下取整
+    
+    # 4. 计算视野中心（框的中心）
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+    
+    # 5. 设置pan使中心点位于视野中心
+    visible_w = view_width / (zoom * scale_1x)
+    visible_h = view_height / (zoom * scale_1x)
+    pan_x = center_x - visible_w / 2
+    pan_y = center_y - visible_h / 2
+```
+
+**触发时机**:
+- 在 `_load_current_image()` 中，加载完图片和框后自动调用
+- 确保每次切换图片时都能自动聚焦到标注区域
+
+**优势**:
+- 无需手动缩放和定位，提高标注效率
+- 自动计算最优倍率，确保所有框都在视野中
+- 视野中心自动对齐到框的中心，方便查看和编辑
 
 ### 7. 性能优化技巧
 
