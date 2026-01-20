@@ -46,6 +46,8 @@ class SessionConfig:
     images_path: str = ""
     pred_labels_path: str = ""
     gt_labels_path: str = ""
+    output_path: str = ""       # required: output directory for corrected annotations
+    human_verified_path: str = ""  # optional: human verified annotations path (can be empty)
     classes_file: str = ""      # optional: classes.txt or data.yaml path
     top_k: int = 10
     backup_enabled: bool = False  # Default to False

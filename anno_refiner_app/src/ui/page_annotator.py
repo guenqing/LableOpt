@@ -409,14 +409,21 @@ class AnnotatorPage:
         img_path = Path(app_state.config.images_path) / rel_path
         img_w, img_h = get_image_size(img_path)
         
-        # GT labels - check for tmp file first
-        gt_label_path = Path(app_state.config.gt_labels_path) / rel_path.with_suffix('.txt')
-        tmp_label_path = gt_label_path.parent / f'{gt_label_path.stem}_tmp.txt'
+        # GT labels - load from Output Path (check for tmp file first, then .txt, fallback to GT Labels Path)
+        output_path = Path(app_state.config.output_path)
+        output_label_path = output_path / rel_path.with_suffix('.txt')
+        output_tmp_path = output_path / rel_path.parent / f'{rel_path.stem}_tmp.txt'
         
-        if tmp_label_path.exists():
-            # Load from tmp file
-            gt_raw = read_yolo_label(tmp_label_path, img_w, img_h, has_confidence=False)
+        gt_raw = []
+        if output_tmp_path.exists():
+            # Load from tmp file in output path
+            gt_raw = read_yolo_label(output_tmp_path, img_w, img_h, has_confidence=False)
+        elif output_label_path.exists():
+            # Load from .txt file in output path
+            gt_raw = read_yolo_label(output_label_path, img_w, img_h, has_confidence=False)
         else:
+            # Fallback to original GT labels path
+            gt_label_path = Path(app_state.config.gt_labels_path) / rel_path.with_suffix('.txt')
             gt_raw = read_yolo_label(gt_label_path, img_w, img_h, has_confidence=False)
         
         # Pred labels
@@ -554,9 +561,9 @@ class AnnotatorPage:
                     'bbox': [box.x, box.y, box.x + box.w, box.y + box.h]
                 })
         
-        # Save to tmp file
+        # Save to tmp file in output path
         save_tmp_annotation(
-            app_state.config.gt_labels_path,
+            app_state.config.output_path,
             item.image_path,
             boxes_dict,
             img_w, img_h
@@ -603,8 +610,8 @@ class AnnotatorPage:
     
     def _on_back(self):
         """Handle back button click"""
-        # Check for any tmp files
-        tmp_files = get_tmp_files(app_state.config.gt_labels_path)
+        # Check for any tmp files in output path
+        tmp_files = get_tmp_files(app_state.config.output_path)
         
         if not tmp_files:
             # No modifications, go directly back
@@ -654,7 +661,7 @@ class AnnotatorPage:
         dialog.close()
         
         try:
-            confirm_changes(app_state.config.gt_labels_path, keep_changes=keep_changes)
+            confirm_changes(app_state.config.output_path, keep_changes=keep_changes)
             
             if keep_changes:
                 ui.notify('Changes saved successfully', type='positive')

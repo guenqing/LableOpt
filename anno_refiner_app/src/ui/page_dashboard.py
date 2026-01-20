@@ -15,7 +15,7 @@ from PIL import Image
 
 from ..state import app_state
 from ..models import IssueType, IssueItem, ClassMapping
-from ..core.file_manager import validate_paths, backup_folder
+from ..core.file_manager import validate_paths, backup_folder, validate_output_path, ensure_output_structure
 from ..core.analyzer import CleanlabAnalyzer
 from ..core.yolo_utils import read_yolo_label, get_image_size
 
@@ -33,12 +33,15 @@ class DashboardPage:
         self.images_input = None
         self.gt_input = None
         self.pred_input = None
+        self.output_input = None
+        self.human_verified_input = None
         self.classes_input = None
         
         # Validation labels
         self.images_status = None
         self.gt_status = None
         self.pred_status = None
+        self.output_status = None
         
         # TopK input
         self.topk_input = None
@@ -126,6 +129,18 @@ class DashboardPage:
                     self.pred_input = ui.input().classes('flex-grow').props('dense outlined size=small')
                     self.pred_status = ui.label('').classes('text-xs whitespace-nowrap')
                 
+                # Output Path
+                ui.label('Output Path').classes('text-xs font-medium text-gray-500')
+                with ui.row().classes('w-full items-center gap-1'):
+                    self.output_input = ui.input(
+                        value='/home/yangxinyu/Test/Data/internalVideos_fireRelated_keyFrameAnnotations_verifying'
+                    ).classes('flex-grow').props('dense outlined size=small')
+                    self.output_status = ui.label('').classes('text-xs whitespace-nowrap')
+                
+                # Human Verified Annotation Path
+                ui.label('Human Verified Annotation Path (opt)').classes('text-xs font-medium text-gray-500')
+                self.human_verified_input = ui.input().classes('w-full').props('dense outlined size=small')
+                
                 # Classes file
                 ui.label('Classes File (opt)').classes('text-xs font-medium text-gray-500')
                 self.classes_input = ui.input().classes('w-full').props('dense outlined size=small')
@@ -156,7 +171,15 @@ class DashboardPage:
         self.images_input.on('change', self._on_path_change)
         self.gt_input.on('change', self._on_path_change)
         self.pred_input.on('change', self._on_path_change)
+        self.output_input.on('change', self._on_output_path_change)
+        self.human_verified_input.on('change', self._on_output_path_change)
         self.classes_input.on('change', self._on_classes_change)
+        
+        # Initialize output path in config
+        if self.output_input.value:
+            app_state.config.output_path = self.output_input.value
+        if self.human_verified_input.value:
+            app_state.config.human_verified_path = self.human_verified_input.value
     
     def _create_issue_lists(self):
         """Create the three issue list columns"""
@@ -229,6 +252,12 @@ class DashboardPage:
         app_state.config.pred_labels_path = self.pred_input.value or ''
         self._validate_paths()
     
+    def _on_output_path_change(self, e=None):
+        """Handle output path input change"""
+        app_state.config.output_path = self.output_input.value or ''
+        app_state.config.human_verified_path = self.human_verified_input.value or ''
+        self._validate_output_path()
+    
     def _validate_paths(self):
         """Validate all paths and update status labels"""
         images_path = self.images_input.value or ''
@@ -264,6 +293,31 @@ class DashboardPage:
                     self.pred_status.text = 'Not found'
                     self.pred_status.classes(remove='text-green-600', add='text-red-500')
     
+    def _validate_output_path(self):
+        """Validate output path and check for conflicts"""
+        output_path = self.output_input.value or ''
+        gt_path = self.gt_input.value or ''
+        pred_path = self.pred_input.value or ''
+        
+        self.output_status.text = ''
+        
+        if not output_path:
+            return
+        
+        status, message = validate_output_path(output_path, gt_path, pred_path)
+        
+        if status == "error":
+            self.output_status.text = 'Required'
+            self.output_status.classes(remove='text-green-600 text-yellow-600', add='text-red-500')
+        elif status == "warning":
+            self.output_status.text = 'Warning'
+            self.output_status.classes(remove='text-green-600 text-red-500', add='text-yellow-600')
+            if message:
+                ui.notify(message, type='warning', timeout=3000)
+        else:
+            self.output_status.text = 'OK'
+            self.output_status.classes(remove='text-red-500 text-yellow-600', add='text-green-600')
+    
     def _on_classes_change(self, e=None):
         """Handle classes file change"""
         app_state.config.classes_file = self.classes_input.value or ''
@@ -282,6 +336,12 @@ class DashboardPage:
     
     async def _run_analysis(self):
         """Run Cleanlab analysis"""
+        # Validate Output Path is required
+        if not app_state.config.output_path or not app_state.config.output_path.strip():
+            ui.notify('Output Path is required. Please set Output Path before running analysis.', 
+                     type='negative', timeout=5000)
+            return
+        
         self._validate_paths()
         if not app_state.path_validation.get('valid', False):
             ui.notify('Please fix path errors before running analysis', type='negative')
@@ -296,6 +356,13 @@ class DashboardPage:
         app_state.reset_analysis()
         
         try:
+            # Ensure output directory structure exists
+            from ..core.yolo_utils import collect_image_paths
+            
+            self._update_progress('Preparing output directory...', 0.01)
+            all_image_rel_paths = collect_image_paths(Path(app_state.config.images_path))
+            ensure_output_structure(app_state.config.output_path, all_image_rel_paths)
+            
             # Backup only if checkbox is checked
             if self.backup_checkbox.value:
                 self._update_progress('Backing up GT folder...', 0.02)
@@ -309,6 +376,8 @@ class DashboardPage:
                 images_path=app_state.config.images_path,
                 pred_labels_path=app_state.config.pred_labels_path,
                 gt_labels_path=app_state.config.gt_labels_path,
+                output_path=app_state.config.output_path,
+                human_verified_path=app_state.config.human_verified_path,
                 progress_callback=self._update_progress
             )
             
@@ -498,16 +567,33 @@ class DashboardPage:
     
     def _goto_annotation(self):
         """Navigate to annotation page"""
+        # Ensure checkbox states are synced to app_state (fix selection logic)
+        app_state.selected_overlooked = self.overlooked_checkbox.value
+        app_state.selected_swapped = self.swapped_checkbox.value
+        app_state.selected_bad_located = self.badloc_checkbox.value
+        
         # Get topK value and apply it when building annotation queue
         top_k = int(self.topk_input.value) if self.topk_input.value else 10
+        
+        # Build annotation queue based on selected types
         app_state.annotation_queue = app_state.get_selected_issues(top_k=top_k)
         app_state.current_annotation_index = 0
         
         if not app_state.annotation_queue:
-            ui.notify('No issues selected.', type='warning')
+            ui.notify('No issues selected. Please select at least one issue type.', type='warning')
             return
         
-        ui.notify(f'Starting with {len(app_state.annotation_queue)} samples (TopK={top_k})', type='info')
+        # Show summary of selected types
+        selected_types = []
+        if app_state.selected_overlooked:
+            selected_types.append('Overlooked')
+        if app_state.selected_swapped:
+            selected_types.append('Swapped')
+        if app_state.selected_bad_located:
+            selected_types.append('Bad Located')
+        
+        type_str = ', '.join(selected_types)
+        ui.notify(f'Starting with {len(app_state.annotation_queue)} samples from {type_str} (TopK={top_k})', type='info')
         ui.navigate.to('/annotator')
 
 

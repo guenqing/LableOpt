@@ -32,11 +32,15 @@ class CleanlabAnalyzer:
         images_path: str,
         pred_labels_path: str,
         gt_labels_path: str,
+        output_path: str = "",
+        human_verified_path: str = "",
         progress_callback: Optional[Callable[[str, float], None]] = None
     ):
         self.images_path = Path(images_path)
         self.pred_labels_path = Path(pred_labels_path)
         self.gt_labels_path = Path(gt_labels_path)
+        self.output_path = output_path
+        self.human_verified_path = human_verified_path
         self.progress_callback = progress_callback or (lambda msg, pct: None)
 
         self.labels: List[Dict[str, Any]] = []        # cleanlab format GT
@@ -59,6 +63,19 @@ class CleanlabAnalyzer:
         step_time = time.time() - step_start
         logger.info(f"Found {len(all_image_rel_paths)} images in {self.images_path} (耗时: {step_time:.3f}s)")
 
+        # Filter out already processed samples
+        from .file_manager import should_skip_sample
+        filtered_paths = []
+        skipped_count = 0
+        for rel_path in all_image_rel_paths:
+            if should_skip_sample(str(rel_path), self.output_path, self.human_verified_path):
+                skipped_count += 1
+            else:
+                filtered_paths.append(rel_path)
+        
+        if skipped_count > 0:
+            logger.info(f"Skipped {skipped_count} already processed samples, {len(filtered_paths)} remaining")
+        
         step_start = time.time()
         self._report_progress("Converting GT labels...", 0.1)
 
@@ -66,7 +83,7 @@ class CleanlabAnalyzer:
         self.labels, self.image_paths = prepare_cleanlab_labels(
             self.images_path,
             self.gt_labels_path,
-            all_image_rel_paths
+            filtered_paths
         )
         step_time = time.time() - step_start
         logger.info(f"Prepared {len(self.labels)} valid samples (耗时: {step_time:.3f}s)")

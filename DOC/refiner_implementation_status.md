@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-01-16
 > 
-> 最新更新: 修复坐标换算问题，优化缩放与导航功能
+> 最新更新: 添加Output Path功能，修复选择逻辑，优化文件保存机制
 
 ## 系统功能与逻辑概述
 
@@ -87,8 +87,8 @@ refiner/
 │       ├── state.py               # 全局状态管理 (AppState)
 │       ├── core/
 │       │   ├── yolo_utils.py      # YOLO 格式转换工具
-│       │   ├── file_manager.py   # 文件备份/临时文件管理
-│       │   └── analyzer.py        # Cleanlab 分析器
+│       │   ├── file_manager.py   # 文件备份/临时文件管理/输出路径管理
+│       │   └── analyzer.py        # Cleanlab 分析器（支持样本过滤）
 │       └── ui/
 │           ├── components.py      # InteractiveAnnotator 组件
 │           ├── page_dashboard.py  # Dashboard 页面
@@ -134,12 +134,25 @@ class IssueItem:
     issue_type: IssueType       # 问题类型
     score: float                # 严重程度分数 (越低越严重)
     box_index: Optional[int]    # 问题框索引
+
+@dataclass
+class SessionConfig:
+    """会话配置"""
+    images_path: str = ""
+    pred_labels_path: str = ""
+    gt_labels_path: str = ""
+    output_path: str = ""       # 输出路径（必填）：修正后的标注保存路径
+    human_verified_path: str = ""  # 人工验证路径（可选）：已人工验证的标注路径
+    classes_file: str = ""
+    top_k: int = 10
+    backup_enabled: bool = False
 ```
 
 **设计要点**:
 - `editable` 字段支持 GT/Pred 角色互换，实现灵活的数据整合
 - `visible` 字段支持单框显示/隐藏控制
 - `source` 枚举区分 GT 和 Pred 框的来源
+- `output_path` 用于保存修正后的标注，避免直接修改原始GT标签
 
 ### 2. YOLO 格式转换 (`src/core/yolo_utils.py`)
 
@@ -194,19 +207,43 @@ def prepare_cleanlab_labels(...):
 - 大样本 (≥10k): 并行处理，最多 32 进程
 - 预期加速: 100 万样本时 3-6x 加速
 
+### 2.5 文件管理 (`src/core/file_manager.py`)
+
+**核心功能**:
+- `save_tmp_annotation()`: 保存临时标注到Output Path
+- `confirm_changes()`: 确认或丢弃更改（操作Output Path）
+- `get_tmp_files()`: 获取Output Path中的临时文件列表
+- `validate_output_path()`: 验证Output Path并检查与GT/Pred路径的冲突
+- `ensure_output_structure()`: 确保Output Path目录结构与GT Labels Path相同
+- `should_skip_sample()`: 检查样本是否已在Output Path或Human Verified Path中存在
+
+**样本过滤逻辑**:
+- 在RUN ANALYSIS时，自动跳过已在Output Path或Human Verified Annotation Path中存在标签的样本
+- 检查 `.txt` 和 `_tmp.txt` 文件
+- 如果Human Verified Path为空，则只检查Output Path
+
 ### 3. Cleanlab 分析器 (`src/core/analyzer.py`)
 
 #### 分析流程
 
 ```python
 class CleanlabAnalyzer:
+    def __init__(self, ..., output_path: str = "", human_verified_path: str = ""):
+        self.output_path = output_path
+        self.human_verified_path = human_verified_path
+    
     def prepare_data(self):
         """准备数据: 格式转换"""
         # 1. 收集图片路径
         all_image_rel_paths = collect_image_paths(self.images_path)
         
-        # 2. 转换 GT 标签
-        self.labels, self.image_paths = prepare_cleanlab_labels(...)
+        # 2. 过滤已处理的样本（跳过Output Path或Human Verified Path中已存在的样本）
+        from .file_manager import should_skip_sample
+        filtered_paths = [p for p in all_image_rel_paths 
+                         if not should_skip_sample(str(p), self.output_path, self.human_verified_path)]
+        
+        # 3. 转换 GT 标签
+        self.labels, self.image_paths = prepare_cleanlab_labels(..., filtered_paths)
         
         # 3. 统计类别数
         self.num_classes = count_classes(...)
@@ -286,7 +323,10 @@ class AppState:
     current_annotation_index: int      # 当前标注索引
     
     def get_selected_issues(self, top_k: int = None) -> List[IssueItem]:
-        """合并选中类型的问题 (去重)"""
+        """合并选中类型的问题 (去重)
+        
+        根据checkbox状态过滤，只返回选中类型的问题样本
+        """
         seen_paths = set()
         merged = []
         
@@ -311,6 +351,29 @@ app_state = AppState()
 
 ### 5. Dashboard 页面 (`src/ui/page_dashboard.py`)
 
+#### 路径配置
+
+Dashboard配置面板包含以下路径输入：
+- **Images Path**: 图片目录
+- **GT Labels Path**: GT标签目录
+- **Pred Labels Path**: 预测标签目录
+- **Output Path** (必填): 输出路径，默认 `/home/yangxinyu/Test/Data/internalVideos_fireRelated_keyFrameAnnotations_verifying`
+  - 系统会检查是否与GT/Pred路径相同，相同则警告但不禁止
+  - 首次使用时自动创建目录结构（与GT Labels Path结构相同）
+- **Human Verified Annotation Path** (可选): 人工验证路径，可为空
+- **Classes File** (可选): 类别映射文件
+
+**路径验证**:
+- Output Path未设置时，RUN ANALYSIS会弹窗警告并拒绝执行
+- 自动验证路径有效性并显示文件统计
+
+#### 选择逻辑
+
+用户可以通过勾选"Overlooked"、"Swapped"、"Bad Located"复选框来选择进入标注工具的问题类型：
+- 只勾选"Overlooked" → 只包含Overlooked类型的样本
+- 勾选多个类型 → 包含所有选中类型的样本（去重）
+- 未勾选任何类型 → 提示用户至少选择一个类型
+
 #### 布局结构
 
 ```
@@ -322,13 +385,14 @@ app_state = AppState()
 │ Panel    │                          │  Panel                │
 │          │  ┌──────┬──────┬──────┐ │                        │
 │ - Paths  │  │Over- │Swap- │Bad   │ │  [Click issue to      │
-│ - Run    │  │looked│ped   │Loc.  │ │   visualize]          │
-│ - TopK   │  │      │      │      │ │                        │
-│          │  │List  │List  │List  │ │                        │
-│          │  └──────┴──────┴──────┘ │                        │
-│          │                          │                        │
-│          │  TopK: [10] [Refresh]    │                        │
-│          │  [Go to Annotation Tool]  │                        │
+│   Images │  │looked│ped   │Loc.  │ │   visualize]          │
+│   GT     │  │      │      │      │ │                        │
+│   Pred   │  │List  │List  │List  │ │                        │
+│   Output │  └──────┴──────┴──────┘ │                        │
+│   Human  │                          │                        │
+│   Verified│                         │                        │
+│ - Run    │  TopK: [10] [Refresh]    │                        │
+│ - Backup │  [Go to Annotation Tool]  │                        │
 └──────────┴──────────────────────────┴───────────────────────┘
 ```
 
@@ -415,9 +479,9 @@ def _on_save(self):
                 'bbox': [box.x, box.y, box.x + box.w, box.y + box.h]
             })
     
-    # 保存到临时文件: {stem}_tmp.txt
+    # 保存到临时文件: {stem}_tmp.txt (保存到Output Path)
     save_tmp_annotation(
-        app_state.config.gt_labels_path,
+        app_state.config.output_path,
         item.image_path,
         boxes_dict,
         img_w, img_h
@@ -558,19 +622,26 @@ class_id center_x center_y width height confidence
 ### 临时文件机制
 
 ```
-原始文件: category/video/frame_00025.txt
-临时文件: category/video/frame_00025_tmp.txt
+原始GT文件: GT_Labels_Path/category/video/frame_00025.txt
+输出路径: Output_Path/category/video/frame_00025.txt
+临时文件: Output_Path/category/video/frame_00025_tmp.txt
 
 加载逻辑:
-  1. 优先读取 _tmp.txt (如果存在)
-  2. 否则读取原始 .txt
+  1. 优先读取 Output_Path 中的 _tmp.txt (如果存在)
+  2. 其次读取 Output_Path 中的 .txt (如果存在)
+  3. 最后回退到原始 GT_Labels_Path 中的 .txt
 
 保存逻辑:
-  1. 编辑后保存到 _tmp.txt
+  1. 编辑后保存到 Output_Path 的 _tmp.txt
   2. 返回时确认:
-     - Yes: _tmp.txt → .txt (覆盖)
+     - Yes: _tmp.txt → .txt (覆盖Output_Path中的文件)
      - No: 删除 _tmp.txt
 ```
+
+**关键变更**:
+- 所有修正后的标注都保存到 `Output Path`，不再直接修改 `GT Labels Path`
+- `Output Path` 必须设置，否则无法运行分析
+- 支持 `Human Verified Annotation Path`（可选），用于标记已人工验证的样本
 
 ---
 
@@ -828,6 +899,22 @@ if np.any(valid_mask):
     # 只处理有效分数
 ```
 
+### 8. Output Path 与样本过滤
+
+**Output Path机制**:
+- 所有修正后的标注保存到Output Path，不直接修改GT Labels Path
+- Output Path目录结构自动与GT Labels Path保持一致
+- 支持Human Verified Annotation Path标记已人工验证的样本
+
+**样本过滤**:
+- RUN ANALYSIS时自动跳过已在Output Path或Human Verified Path中存在的样本
+- 避免重复处理已修正的样本，提高效率
+
+**选择逻辑**:
+- Dashboard中通过复选框选择问题类型（Overlooked/Swapped/Bad Located）
+- 进入标注工具时只包含选中类型的问题样本
+- 支持多选，自动去重
+
 ---
 
 ## 启动与使用
@@ -848,27 +935,32 @@ python main.py --port 8088
    ├─ Images Path: 图片目录
    ├─ GT Labels Path: GT 标签目录
    ├─ Pred Labels Path: 预测标签目录
+   ├─ Output Path: 输出路径（必填），修正后的标注保存路径
+   ├─ Human Verified Annotation Path: 人工验证路径（可选）
    └─ Classes File (可选): 类别映射文件
 
 2. 运行分析
+   ├─ 系统自动创建 Output Path 目录结构
+   ├─ 自动跳过已在 Output Path 或 Human Verified Path 中存在的样本
    └─ 点击 "RUN ANALYSIS" → 等待完成
 
 3. 查看问题
    ├─ 三列问题列表显示
    ├─ 点击问题项查看可视化
-   └─ 选择问题类型 (复选框)
+   └─ 选择问题类型 (复选框) - 可多选，用于过滤标注队列
 
 4. 进入标注
    ├─ 设置 TopK 值
-   └─ 点击 "Go to Annotation Tool"
+   ├─ 勾选需要标注的问题类型（Overlooked/Swapped/Bad Located）
+   └─ 点击 "Go to Annotation Tool" - 只包含选中类型的问题
 
 5. 编辑标注
    ├─ 使用鼠标/键盘编辑框
    ├─ 使用一键操作快速处理
-   └─ 保存修改 (手动或自动)
+   └─ 保存修改 (手动或自动) - 保存到 Output Path
 
 6. 确认保存
-   └─ 返回时选择 Keep/Discard
+   └─ 返回时选择 Keep/Discard - 操作 Output Path 中的文件
 ```
 
 ---
