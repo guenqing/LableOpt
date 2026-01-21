@@ -104,6 +104,85 @@ def collect_image_paths(images_dir: Path) -> List[Path]:
     return sorted(image_paths)
 
 
+def collect_label_keys(labels_dir: Path, exclude_tmp: bool = True) -> set[Path]:
+    """
+    Collect label "keys" from a YOLO labels directory.
+
+    A "key" is the relative path without suffix, e.g.:
+      labels_dir/a/b/x.txt -> Path("a/b/x")
+
+    Args:
+        labels_dir: labels root directory
+        exclude_tmp: whether to exclude *_tmp.txt files
+
+    Returns:
+        Set of relative Path keys (without suffix)
+    """
+    keys: set[Path] = set()
+    if not labels_dir.exists():
+        return keys
+
+    for p in labels_dir.rglob('*.txt'):
+        if not p.is_file():
+            continue
+        if exclude_tmp and p.name.endswith('_tmp.txt'):
+            continue
+        rel = p.relative_to(labels_dir)
+        keys.add(rel.with_suffix(''))
+    return keys
+
+
+def filter_image_paths_by_label_keys(
+    image_rel_paths: List[Path],
+    gt_keys: set[Path],
+    pred_keys: set[Path],
+) -> List[Path]:
+    """
+    Filter image relative paths by the intersection of GT and Pred label keys.
+
+    Args:
+        image_rel_paths: image relative paths (relative to images root)
+        gt_keys: keys collected from GT label files (relative paths without suffix)
+        pred_keys: keys collected from Pred label files (relative paths without suffix)
+
+    Returns:
+        Filtered list of image relative paths that have both GT and Pred labels.
+    """
+    filtered: List[Path] = []
+    for rel_path in image_rel_paths:
+        key = rel_path.with_suffix('')
+        if key in gt_keys and key in pred_keys:
+            filtered.append(rel_path)
+    return filtered
+
+
+def find_image_rel_path_for_key(
+    images_dir: Path,
+    key: Path,
+    image_extensions: Optional[set[str]] = None,
+) -> Optional[Path]:
+    """
+    Resolve an image relative path from a key (relative path without suffix).
+
+    Args:
+        images_dir: images root directory
+        key: relative path without suffix, e.g. Path("a/b/x")
+        image_extensions: allowed extensions (lowercase, include leading dot)
+
+    Returns:
+        Relative image path with a concrete extension, or None if not found.
+    """
+    exts = image_extensions or {'.jpg', '.jpeg', '.png', '.bmp'}
+    # deterministic preference for common extensions
+    ordered_exts = [e for e in ['.jpg', '.jpeg', '.png', '.bmp'] if e in exts] + sorted(exts - {'.jpg', '.jpeg', '.png', '.bmp'})
+    for ext in ordered_exts:
+        rel_img = key.with_suffix(ext)
+        p = images_dir / rel_img
+        if p.is_file():
+            return rel_img
+    return None
+
+
 def _process_single_image_gt_worker(args: Tuple[str, str, str]) -> Optional[Tuple[Dict[str, Any], str]]:
     """
     Worker function for processing single image GT label (must be top-level for pickling).

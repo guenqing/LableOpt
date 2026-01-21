@@ -43,6 +43,7 @@ class IssueItem:
 @dataclass  
 class SessionConfig:
     """Session configuration"""
+    base_dir: str = "/home/yangxinyu/Test/Data/"
     images_path: str = ""
     pred_labels_path: str = ""
     gt_labels_path: str = ""

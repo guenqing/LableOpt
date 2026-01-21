@@ -56,28 +56,67 @@ class CleanlabAnalyzer:
     def prepare_data(self):
         """Prepare data: format conversion"""
         step_start = time.time()
-        self._report_progress("Collecting image paths...", 0.05)
+        self._report_progress("Collecting analysis samples...", 0.05)
 
-        # Collect all image paths from nested structure
-        all_image_rel_paths = collect_image_paths(self.images_path)
-        step_time = time.time() - step_start
-        logger.info(f"Found {len(all_image_rel_paths)} images in {self.images_path} (耗时: {step_time:.3f}s)")
-
-        # Filter out already processed samples
+        # NOTE:
+        # For large datasets, scanning all images (Images Path) can be extremely slow
+        # and causes the UI connection to drop. We therefore enumerate samples based on
+        # the intersection of:
+        #   (1) GT label files (exclude *_tmp.txt)
+        #   (2) Pred label files
+        #   (3) Existing image files (any supported extension)
+        # Then we exclude samples already present in Output/HumanVerified paths.
         from .file_manager import should_skip_sample
-        filtered_paths = []
+        from .yolo_utils import find_image_rel_path_for_key
+
+        gt_label_files = [
+            p for p in self.gt_labels_path.rglob('*.txt')
+            if p.is_file() and not p.name.endswith('_tmp.txt')
+        ]
+        total_gt = len(gt_label_files)
+        if total_gt == 0:
+            raise ValueError(f"No GT label files found in {self.gt_labels_path} (excluding *_tmp.txt)")
+
+        filtered_paths: List[Path] = []
         skipped_count = 0
-        for rel_path in all_image_rel_paths:
-            if should_skip_sample(str(rel_path), self.output_path, self.human_verified_path):
-                skipped_count += 1
+        missing_pred_count = 0
+        missing_image_count = 0
+
+        # throttle progress reports (avoid log spam)
+        last_report_ts = 0.0
+        for i, gt_file in enumerate(gt_label_files, start=1):
+            key = gt_file.relative_to(self.gt_labels_path).with_suffix('')  # e.g. a/b/x
+
+            pred_label_path = self.pred_labels_path / key.with_suffix('.txt')
+            if not pred_label_path.exists():
+                missing_pred_count += 1
             else:
-                filtered_paths.append(rel_path)
-        
-        if skipped_count > 0:
-            logger.info(f"Skipped {skipped_count} already processed samples, {len(filtered_paths)} remaining")
+                img_rel_path = find_image_rel_path_for_key(self.images_path, key)
+                if img_rel_path is None:
+                    missing_image_count += 1
+                elif should_skip_sample(str(img_rel_path), self.output_path, self.human_verified_path):
+                    skipped_count += 1
+                else:
+                    filtered_paths.append(img_rel_path)
+
+            now = time.time()
+            if (now - last_report_ts) >= 1.0 or i == total_gt:
+                last_report_ts = now
+                # map loop progress into 5% -> 10%
+                pct = 0.05 + (i / total_gt) * 0.05
+                self._report_progress(f"Collecting analysis samples... {i}/{total_gt}", pct)
+
+        filtered_paths = sorted(filtered_paths)
+        step_time = time.time() - step_start
+        logger.info(
+            f"Sample collection done: gt={total_gt} "
+            f"candidate={len(filtered_paths)} skipped={skipped_count} "
+            f"missing_pred={missing_pred_count} missing_img={missing_image_count} "
+            f"(耗时: {step_time:.3f}s)"
+        )
         
         step_start = time.time()
-        self._report_progress("Converting GT labels...", 0.1)
+        self._report_progress(f"Converting GT labels ({len(filtered_paths)} samples)...", 0.1)
 
         # Convert GT labels to cleanlab format
         self.labels, self.image_paths = prepare_cleanlab_labels(
@@ -89,7 +128,7 @@ class CleanlabAnalyzer:
         logger.info(f"Prepared {len(self.labels)} valid samples (耗时: {step_time:.3f}s)")
 
         step_start = time.time()
-        self._report_progress("Counting classes...", 0.2)
+        self._report_progress(f"Counting classes ({len(self.image_paths)} samples)...", 0.2)
 
         # Count classes
         self.num_classes = count_classes(
@@ -101,7 +140,7 @@ class CleanlabAnalyzer:
         logger.info(f"Detected {self.num_classes} classes (耗时: {step_time:.3f}s)")
 
         step_start = time.time()
-        self._report_progress("Converting Pred labels...", 0.3)
+        self._report_progress(f"Converting Pred labels ({len(self.image_paths)} samples)...", 0.3)
 
         # Convert predictions to cleanlab format
         self.predictions = prepare_cleanlab_predictions(

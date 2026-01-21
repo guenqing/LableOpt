@@ -118,6 +118,9 @@ def validate_paths(images_path: str, gt_labels_path: str, pred_labels_path: str)
         'errors': []
     }
 
+    start_time = datetime.now()
+    logger.info(f"Validating paths: images={images_path} gt={gt_labels_path} pred={pred_labels_path}")
+
     images_dir = Path(images_path)
     gt_dir = Path(gt_labels_path)
     pred_dir = Path(pred_labels_path)
@@ -154,6 +157,11 @@ def validate_paths(images_path: str, gt_labels_path: str, pred_labels_path: str)
         result['valid'] = False
         result['errors'].append("No images found in images directory")
 
+    elapsed = (datetime.now() - start_time).total_seconds()
+    logger.info(
+        f"Path validation done in {elapsed:.3f}s: "
+        f"valid={result['valid']} imgs={result['images_count']} gt={result['gt_count']} pred={result['pred_count']}"
+    )
     return result
 
 

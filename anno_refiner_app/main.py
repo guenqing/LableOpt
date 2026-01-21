@@ -44,9 +44,21 @@ def main():
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
     parser.add_argument('--port', type=int, default=8080, help='Port to bind to')
     parser.add_argument('--reload', action='store_true', help='Enable auto-reload')
+    parser.add_argument(
+        '--base-dir',
+        default='/home/yangxinyu/Test/Data/',
+        help='Base directory for UI-relative paths'
+    )
     args = parser.parse_args()
     
     logger.info(f'Starting Annotation Refiner on {args.host}:{args.port}')
+
+    # Apply base dir to global config (used by UI for relative paths)
+    try:
+        from src.state import app_state
+        app_state.config.base_dir = args.base_dir
+    except Exception as ex:
+        logger.warning(f'Failed to set base dir: {ex}')
     
     # Setup routes
     setup_routes()

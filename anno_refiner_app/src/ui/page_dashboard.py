@@ -15,7 +15,8 @@ from PIL import Image
 
 from ..state import app_state
 from ..models import IssueType, IssueItem, ClassMapping
-from ..core.file_manager import validate_paths, backup_folder, validate_output_path, ensure_output_structure
+from ..core.file_manager import validate_paths, backup_folder, validate_output_path
+from ..core.path_utils import resolve_with_base_dir
 from ..core.analyzer import CleanlabAnalyzer
 from ..core.yolo_utils import read_yolo_label, get_image_size
 
@@ -28,6 +29,12 @@ class DashboardPage:
         self.progress_label = None
         self.run_button = None
         self.goto_button = None
+        self._analysis_progress_timer = None
+
+        # Path parsing progress (for validate_paths)
+        self.parse_progress_bar = None
+        self.parse_progress_label = None
+        self._validate_task = None
         
         # Path input fields
         self.images_input = None
@@ -110,36 +117,42 @@ class DashboardPage:
         with ui.card().classes('w-72 flex-shrink-0 shadow'):
             with ui.column().classes('w-full p-4 gap-3'):
                 ui.label('Configuration').classes('text-base font-bold text-gray-700')
+
+                ui.label(f'Base Dir: {app_state.config.base_dir}').classes('text-[10px] text-gray-400 break-all')
                 
                 # Images path
                 ui.label('Images Path').classes('text-xs font-medium text-gray-500 mt-1')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.images_input = ui.input().classes('flex-grow').props('dense outlined size=small')
+                    self.images_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
                     self.images_status = ui.label('').classes('text-xs whitespace-nowrap')
                 
                 # GT Labels path
                 ui.label('GT Labels Path').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.gt_input = ui.input().classes('flex-grow').props('dense outlined size=small')
+                    self.gt_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
                     self.gt_status = ui.label('').classes('text-xs whitespace-nowrap')
                 
                 # Pred Labels path
                 ui.label('Pred Labels Path').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.pred_input = ui.input().classes('flex-grow').props('dense outlined size=small')
+                    self.pred_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
                     self.pred_status = ui.label('').classes('text-xs whitespace-nowrap')
+
+                # Parse progress (for path validation)
+                self.parse_progress_label = ui.label('').classes('text-[10px] text-gray-400')
+                self.parse_progress_bar = ui.linear_progress().classes('w-full')
+                self.parse_progress_bar.props('indeterminate')
+                self.parse_progress_bar.visible = False
                 
                 # Output Path
                 ui.label('Output Path').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.output_input = ui.input(
-                        value='/home/yangxinyu/Test/Data/internalVideos_fireRelated_keyFrameAnnotations_verifying'
-                    ).classes('flex-grow').props('dense outlined size=small')
+                    self.output_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
                     self.output_status = ui.label('').classes('text-xs whitespace-nowrap')
                 
                 # Human Verified Annotation Path
                 ui.label('Human Verified Annotation Path (opt)').classes('text-xs font-medium text-gray-500')
-                self.human_verified_input = ui.input().classes('w-full').props('dense outlined size=small')
+                self.human_verified_input = ui.input().classes('w-full').props('dense outlined size=small placeholder="relative to base dir"')
                 
                 # Classes file
                 ui.label('Classes File (opt)').classes('text-xs font-medium text-gray-500')
@@ -158,6 +171,9 @@ class DashboardPage:
                 self.progress_label = ui.label('').classes('text-xs text-gray-500')
                 self.progress_bar = ui.linear_progress(value=0, show_value=False).classes('w-full')
                 self.progress_bar.visible = False
+
+                # Keep UI progress synced from global state (safe across reconnects)
+                self._analysis_progress_timer = ui.timer(0.2, self._refresh_analysis_progress)
                 
                 ui.separator().classes('my-2')
                 
@@ -175,11 +191,8 @@ class DashboardPage:
         self.human_verified_input.on('change', self._on_output_path_change)
         self.classes_input.on('change', self._on_classes_change)
         
-        # Initialize output path in config
-        if self.output_input.value:
-            app_state.config.output_path = self.output_input.value
-        if self.human_verified_input.value:
-            app_state.config.human_verified_path = self.human_verified_input.value
+        # Initialize paths in config (as absolute paths)
+        self._sync_paths_to_config()
     
     def _create_issue_lists(self):
         """Create the three issue list columns"""
@@ -247,22 +260,36 @@ class DashboardPage:
     
     def _on_path_change(self, e=None):
         """Handle path input change"""
-        app_state.config.images_path = self.images_input.value or ''
-        app_state.config.gt_labels_path = self.gt_input.value or ''
-        app_state.config.pred_labels_path = self.pred_input.value or ''
-        self._validate_paths()
+        self._sync_paths_to_config()
+        self._schedule_validate_paths()
     
     def _on_output_path_change(self, e=None):
         """Handle output path input change"""
-        app_state.config.output_path = self.output_input.value or ''
-        app_state.config.human_verified_path = self.human_verified_input.value or ''
+        self._sync_paths_to_config()
         self._validate_output_path()
+
+    def _to_abs(self, user_value: str) -> str:
+        return resolve_with_base_dir(app_state.config.base_dir, user_value or '')
+
+    def _sync_paths_to_config(self) -> None:
+        """Sync UI input (relative/absolute) into config as absolute paths."""
+        app_state.config.images_path = self._to_abs(self.images_input.value)
+        app_state.config.gt_labels_path = self._to_abs(self.gt_input.value)
+        app_state.config.pred_labels_path = self._to_abs(self.pred_input.value)
+        app_state.config.output_path = self._to_abs(self.output_input.value)
+        app_state.config.human_verified_path = self._to_abs(self.human_verified_input.value)
+
+    def _schedule_validate_paths(self) -> None:
+        """Debounced, non-blocking path validation with progress indicator."""
+        if self._validate_task and not self._validate_task.done():
+            self._validate_task.cancel()
+        self._validate_task = asyncio.create_task(self._validate_paths_async())
     
     def _validate_paths(self):
         """Validate all paths and update status labels"""
-        images_path = self.images_input.value or ''
-        gt_path = self.gt_input.value or ''
-        pred_path = self.pred_input.value or ''
+        images_path = app_state.config.images_path or ''
+        gt_path = app_state.config.gt_labels_path or ''
+        pred_path = app_state.config.pred_labels_path or ''
         
         self.images_status.text = ''
         self.gt_status.text = ''
@@ -292,12 +319,84 @@ class DashboardPage:
                 elif 'Pred' in error:
                     self.pred_status.text = 'Not found'
                     self.pred_status.classes(remove='text-green-600', add='text-red-500')
+
+    async def _validate_paths_async(self):
+        """Async wrapper around validate_paths with an indeterminate progress bar."""
+        # debounce typing
+        await asyncio.sleep(0.2)
+
+        images_path = app_state.config.images_path or ''
+        gt_path = app_state.config.gt_labels_path or ''
+        pred_path = app_state.config.pred_labels_path or ''
+
+        self.images_status.text = ''
+        self.gt_status.text = ''
+        self.pred_status.text = ''
+
+        if not images_path or not gt_path or not pred_path:
+            if self.parse_progress_bar:
+                self.parse_progress_bar.visible = False
+            if self.parse_progress_label:
+                self.parse_progress_label.text = ''
+            return
+
+        if self.parse_progress_label:
+            self.parse_progress_label.text = 'Parsing paths...'
+        if self.parse_progress_bar:
+            self.parse_progress_bar.visible = True
+
+        start_time = time.time()
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda: validate_paths(images_path, gt_path, pred_path))
+            app_state.path_validation = result
+            self._apply_path_validation_result(result)
+
+            elapsed = time.time() - start_time
+            import logging
+            logging.getLogger(__name__).info(
+                f'Path parsing done in {elapsed:.3f}s: '
+                f'imgs={result.get("images_count")} gt={result.get("gt_count")} pred={result.get("pred_count")} '
+                f'valid={result.get("valid")}'
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as ex:
+            import logging
+            logging.getLogger(__name__).error(f'Path parsing failed: {ex}')
+        finally:
+            if self.parse_progress_bar:
+                self.parse_progress_bar.visible = False
+            if self.parse_progress_label:
+                self.parse_progress_label.text = ''
+
+    def _apply_path_validation_result(self, result: dict) -> None:
+        """Apply validate_paths() result to UI status labels."""
+        if result.get('valid'):
+            self.images_status.text = f'{result["images_count"]} imgs'
+            self.images_status.classes(remove='text-red-500', add='text-green-600')
+            self.gt_status.text = f'{result["gt_count"]} files'
+            self.gt_status.classes(remove='text-red-500', add='text-green-600')
+            self.pred_status.text = f'{result["pred_count"]} files'
+            self.pred_status.classes(remove='text-red-500', add='text-green-600')
+            return
+
+        for error in result.get('errors', []):
+            if 'Images' in error:
+                self.images_status.text = 'Not found'
+                self.images_status.classes(remove='text-green-600', add='text-red-500')
+            elif 'GT' in error:
+                self.gt_status.text = 'Not found'
+                self.gt_status.classes(remove='text-green-600', add='text-red-500')
+            elif 'Pred' in error:
+                self.pred_status.text = 'Not found'
+                self.pred_status.classes(remove='text-green-600', add='text-red-500')
     
     def _validate_output_path(self):
         """Validate output path and check for conflicts"""
-        output_path = self.output_input.value or ''
-        gt_path = self.gt_input.value or ''
-        pred_path = self.pred_input.value or ''
+        output_path = app_state.config.output_path or ''
+        gt_path = app_state.config.gt_labels_path or ''
+        pred_path = app_state.config.pred_labels_path or ''
         
         self.output_status.text = ''
         
@@ -338,39 +437,56 @@ class DashboardPage:
         """Run Cleanlab analysis"""
         # Validate Output Path is required
         if not app_state.config.output_path or not app_state.config.output_path.strip():
-            ui.notify('Output Path is required. Please set Output Path before running analysis.', 
-                     type='negative', timeout=5000)
+            self._safe_notify(
+                'Output Path is required. Please set Output Path before running analysis.',
+                type='negative',
+                timeout=5000,
+            )
             return
-        
-        self._validate_paths()
-        if not app_state.path_validation.get('valid', False):
-            ui.notify('Please fix path errors before running analysis', type='negative')
+
+        # Lightweight validation (avoid scanning huge directories on click)
+        images_path = app_state.config.images_path or ''
+        gt_path = app_state.config.gt_labels_path or ''
+        pred_path = app_state.config.pred_labels_path or ''
+        if not images_path or not Path(images_path).exists():
+            self._safe_notify('Images Path not found. Please check the path.', type='negative')
+            return
+        if not gt_path or not Path(gt_path).exists():
+            self._safe_notify('GT Labels Path not found. Please check the path.', type='negative')
+            return
+        if not pred_path or not Path(pred_path).exists():
+            self._safe_notify('Pred Labels Path not found. Please check the path.', type='negative')
             return
         
         # Record start time
         start_time = time.time()
         
-        self.run_button.disable()
-        self.progress_bar.visible = True
-        app_state.is_analyzing = True
         app_state.reset_analysis()
+        app_state.is_analyzing = True
+        self._update_progress('Starting analysis...', 0.0)
+
+        try:
+            if self.run_button:
+                self.run_button.disable()
+            if self.progress_bar:
+                self.progress_bar.visible = True
+        except RuntimeError:
+            # client disconnected; keep analysis running via global state
+            pass
         
         try:
-            # Ensure output directory structure exists
-            from ..core.yolo_utils import collect_image_paths
-            
             self._update_progress('Preparing output directory...', 0.01)
-            all_image_rel_paths = collect_image_paths(Path(app_state.config.images_path))
-            ensure_output_structure(app_state.config.output_path, all_image_rel_paths)
+            Path(app_state.config.output_path).mkdir(parents=True, exist_ok=True)
             
             # Backup only if checkbox is checked
             if self.backup_checkbox.value:
                 self._update_progress('Backing up GT folder...', 0.02)
                 try:
-                    backup_path = backup_folder(app_state.config.gt_labels_path)
-                    ui.notify(f'Backup created: {Path(backup_path).name}', type='positive')
+                    loop = asyncio.get_event_loop()
+                    backup_path = await loop.run_in_executor(None, lambda: backup_folder(app_state.config.gt_labels_path))
+                    self._safe_notify(f'Backup created: {Path(backup_path).name}', type='positive')
                 except Exception as ex:
-                    ui.notify(f'Backup failed: {ex}', type='warning')
+                    self._safe_notify(f'Backup failed: {ex}', type='warning')
             
             analyzer = CleanlabAnalyzer(
                 images_path=app_state.config.images_path,
@@ -381,11 +497,10 @@ class DashboardPage:
                 progress_callback=self._update_progress
             )
             
-            await asyncio.get_event_loop().run_in_executor(None, analyzer.prepare_data)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, analyzer.prepare_data)
             
-            results = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: analyzer.analyze(top_k=1000)
-            )
+            results = await loop.run_in_executor(None, lambda: analyzer.analyze(top_k=1000))
             
             app_state.results.overlooked = results[IssueType.OVERLOOKED]
             app_state.results.swapped = results[IssueType.SWAPPED]
@@ -403,18 +518,23 @@ class DashboardPage:
             
             app_state.analysis_complete = True
             self._update_progress('Analysis complete!', 1.0)
-            self._update_results_display()
-            
-            self.goto_button.enable()
-            self.refresh_button.enable()
+            try:
+                self._update_results_display()
+                if self.goto_button:
+                    self.goto_button.enable()
+                if self.refresh_button:
+                    self.refresh_button.enable()
+            except RuntimeError:
+                # client disconnected
+                pass
             
             # Show counts for each category (these are stored with top_k=1000 from cleanlab)
             n_overlooked = len(app_state.results.overlooked)
             n_swapped = len(app_state.results.swapped)
             n_badloc = len(app_state.results.bad_located)
-            ui.notify(
+            self._safe_notify(
                 f'Analysis complete: {n_overlooked} overlooked, {n_swapped} swapped, {n_badloc} bad located',
-                type='positive'
+                type='positive',
             )
             
             # Log total elapsed time
@@ -429,19 +549,62 @@ class DashboardPage:
             logger = logging.getLogger(__name__)
             logger.error(f'Analysis failed after {elapsed_time:.3f} seconds: {ex}')
             
-            ui.notify(f'Analysis failed: {ex}', type='negative')
+            self._update_progress(f'Analysis failed: {ex}', 1.0)
+            self._safe_notify(f'Analysis failed: {ex}', type='negative')
             import traceback
             traceback.print_exc()
         finally:
             app_state.is_analyzing = False
-            self.run_button.enable()
+            try:
+                if self.run_button:
+                    self.run_button.enable()
+            except RuntimeError:
+                pass
     
     def _update_progress(self, message: str, percentage: float):
-        """Update progress display"""
-        if self.progress_label:
-            self.progress_label.text = message
-        if self.progress_bar:
-            self.progress_bar.value = percentage
+        """Update global progress state (safe to call from worker threads)."""
+        app_state.analysis_message = message or ''
+        try:
+            pct = float(percentage)
+        except Exception:
+            pct = 0.0
+        app_state.analysis_progress = max(0.0, min(1.0, pct))
+
+    def _refresh_analysis_progress(self) -> None:
+        """Refresh UI progress widgets from global state."""
+        try:
+            if self.progress_label:
+                self.progress_label.text = app_state.analysis_message or ''
+            if self.progress_bar:
+                self.progress_bar.value = float(app_state.analysis_progress or 0.0)
+                self.progress_bar.visible = bool(app_state.is_analyzing)
+
+            # keep button state sensible after reconnects
+            if self.run_button:
+                if app_state.is_analyzing:
+                    self.run_button.disable()
+                else:
+                    self.run_button.enable()
+            if self.goto_button:
+                if app_state.analysis_complete and (not app_state.is_analyzing):
+                    self.goto_button.enable()
+                else:
+                    self.goto_button.disable()
+            if self.refresh_button:
+                if app_state.analysis_complete and (not app_state.is_analyzing):
+                    self.refresh_button.enable()
+                else:
+                    self.refresh_button.disable()
+        except RuntimeError:
+            # client disconnected
+            return
+
+    def _safe_notify(self, message: str, type: str = 'info', timeout: int = 3000) -> None:
+        """Notify if a client is available; otherwise just ignore."""
+        try:
+            ui.notify(message, type=type, timeout=timeout)
+        except RuntimeError:
+            return
     
     def _update_results_display(self):
         """Update results tables"""

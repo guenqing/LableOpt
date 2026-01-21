@@ -1,8 +1,8 @@
 # Refiner 系统技术文档
 
-> 最后更新: 2026-01-16
+> 最后更新: 2026-01-21
 > 
-> 最新更新: 修复放大状态下创建标注框功能，实现自动聚焦功能，优化快捷键布局
+> 最新更新: 修复大目录 RUN ANALYSIS 卡死/断线：分析样本按 Images ∩ GT ∩ Pred 交集选择并跳过 Output/HumanVerified；进度改为全局状态轮询以支持断线重连；新增 Base Dir 相对路径解析与 CLI 参数。
 
 ## 系统功能与逻辑概述
 
@@ -88,6 +88,7 @@ refiner/
 │       ├── core/
 │       │   ├── yolo_utils.py      # YOLO 格式转换工具
 │       │   ├── file_manager.py   # 文件备份/临时文件管理/输出路径管理
+│       │   ├── path_utils.py      # Base Dir 相对路径解析
 │       │   └── analyzer.py        # Cleanlab 分析器（支持样本过滤）
 │       └── ui/
 │           ├── components.py      # InteractiveAnnotator 组件
@@ -138,6 +139,7 @@ class IssueItem:
 @dataclass
 class SessionConfig:
     """会话配置"""
+    base_dir: str = "/home/yangxinyu/Test/Data/"
     images_path: str = ""
     pred_labels_path: str = ""
     gt_labels_path: str = ""
@@ -153,6 +155,7 @@ class SessionConfig:
 - `visible` 字段支持单框显示/隐藏控制
 - `source` 枚举区分 GT 和 Pred 框的来源
 - `output_path` 用于保存修正后的标注，避免直接修改原始GT标签
+- `base_dir` 用于将 Dashboard 中输入的相对路径解析为绝对路径（可通过启动参数 `--base-dir` 覆盖）
 
 ### 2. YOLO 格式转换 (`src/core/yolo_utils.py`)
 
@@ -207,18 +210,32 @@ def prepare_cleanlab_labels(...):
 - 大样本 (≥10k): 并行处理，最多 32 进程
 - 预期加速: 100 万样本时 3-6x 加速
 
+#### 样本枚举辅助（交集过滤）
+
+为避免在大数据集下扫描全量 Images，`yolo_utils.py` 提供了按“label key”枚举样本的辅助函数：
+
+- `collect_label_keys(labels_dir, exclude_tmp=True)`: 收集标签文件对应的 key（相对路径去后缀），可排除 `*_tmp.txt`
+- `find_image_rel_path_for_key(images_dir, key)`: 根据 key 在 Images Path 下自动探测图片扩展名（`.jpg/.jpeg/.png/.bmp`），返回实际存在的相对路径
+- `filter_image_paths_by_label_keys(image_rel_paths, gt_keys, pred_keys)`: 仅保留同时存在 GT/Pred 的图片路径（用于小规模或已有 image 列表的场景）
+
+### 2.4 路径解析工具 (`src/core/path_utils.py`)
+
+- `resolve_with_base_dir(base_dir, user_path)`: 将 UI 输入的相对路径基于 `base_dir` 解析为绝对路径；绝对路径原样返回；空输入返回空字符串
+
 ### 2.5 文件管理 (`src/core/file_manager.py`)
 
 **核心功能**:
 - `save_tmp_annotation()`: 保存临时标注到Output Path
 - `confirm_changes()`: 确认或丢弃更改（操作Output Path）
 - `get_tmp_files()`: 获取Output Path中的临时文件列表
+- `validate_paths()`: 验证输入路径并统计文件数（包含耗时日志）
 - `validate_output_path()`: 验证Output Path并检查与GT/Pred路径的冲突
-- `ensure_output_structure()`: 确保Output Path目录结构与GT Labels Path相同
+- `ensure_output_structure()`: 批量创建Output子目录结构（大数据集下不建议在RUN ANALYSIS前全量扫描创建，现已改为按需创建）
 - `should_skip_sample()`: 检查样本是否已在Output Path或Human Verified Path中存在
 
 **样本过滤逻辑**:
-- 在RUN ANALYSIS时，自动跳过已在Output Path或Human Verified Annotation Path中存在标签的样本
+- RUN ANALYSIS样本由 `analyzer.prepare_data()` 先按 `GT Labels ∩ Pred Labels ∩ Images` 收集
+- 之后自动跳过已在Output Path或Human Verified Annotation Path中存在标签的样本
 - 检查 `.txt` 和 `_tmp.txt` 文件
 - 如果Human Verified Path为空，则只检查Output Path
 
@@ -234,15 +251,14 @@ class CleanlabAnalyzer:
     
     def prepare_data(self):
         """准备数据: 格式转换"""
-        # 1. 收集图片路径
-        all_image_rel_paths = collect_image_paths(self.images_path)
+        # 1. 收集候选样本（避免扫描全量 Images）
+        #    - 遍历 GT Labels 下的 *.txt（排除 *_tmp.txt）
+        #    - 要求 Pred Labels/{key}.txt 存在
+        #    - 要求 Images/{key}.{jpg|jpeg|png|bmp} 存在（自动探测扩展名）
+        #    - 跳过 Output/HumanVerified 中已存在 .txt 或 _tmp.txt 的样本
+        filtered_paths = ...  # 遍历GT label files，检查Pred存在、匹配Image存在（自动探测扩展名），再用should_skip_sample过滤
         
-        # 2. 过滤已处理的样本（跳过Output Path或Human Verified Path中已存在的样本）
-        from .file_manager import should_skip_sample
-        filtered_paths = [p for p in all_image_rel_paths 
-                         if not should_skip_sample(str(p), self.output_path, self.human_verified_path)]
-        
-        # 3. 转换 GT 标签
+        # 2. 转换 GT 标签
         self.labels, self.image_paths = prepare_cleanlab_labels(..., filtered_paths)
         
         # 3. 统计类别数
@@ -354,18 +370,26 @@ app_state = AppState()
 #### 路径配置
 
 Dashboard配置面板包含以下路径输入：
+- **Base Dir**: 相对路径解析基准目录（UI输入相对路径时会与Base Dir拼接；可通过启动参数 `--base-dir` 设置）
 - **Images Path**: 图片目录
 - **GT Labels Path**: GT标签目录
 - **Pred Labels Path**: 预测标签目录
 - **Output Path** (必填): 输出路径，默认 `/home/yangxinyu/Test/Data/internalVideos_fireRelated_keyFrameAnnotations_verifying`
   - 系统会检查是否与GT/Pred路径相同，相同则警告但不禁止
-  - 首次使用时自动创建目录结构（与GT Labels Path结构相同）
+  - RUN ANALYSIS时仅确保Output Path根目录存在；子目录在保存标注时按需创建（避免大目录预扫描）
 - **Human Verified Annotation Path** (可选): 人工验证路径，可为空
 - **Classes File** (可选): 类别映射文件
 
 **路径验证**:
 - Output Path未设置时，RUN ANALYSIS会弹窗警告并拒绝执行
-- 自动验证路径有效性并显示文件统计
+- 路径输入变化时异步执行 `validate_paths()` 并显示文件统计（Parsing paths...）
+- RUN ANALYSIS点击时只做轻量 `Path.exists()` 校验，避免大目录阻塞导致断线
+
+#### 运行分析与进度（断线重连安全）
+
+- 分析进度由后端写入全局状态（`app_state.analysis_message` / `app_state.analysis_progress`）
+- UI端使用 `ui.timer` 轮询刷新进度条与按钮状态
+- 客户端断线/重连不会导致后台因更新已销毁UI元素而抛异常，从而避免分析中途失败
 
 #### 选择逻辑
 
@@ -990,11 +1014,11 @@ if np.any(valid_mask):
 
 **Output Path机制**:
 - 所有修正后的标注保存到Output Path，不直接修改GT Labels Path
-- Output Path目录结构自动与GT Labels Path保持一致
+- Output Path目录结构通过“按相对路径保存 + 按需创建子目录”与GT Labels Path保持一致（不在RUN ANALYSIS前全量预创建）
 - 支持Human Verified Annotation Path标记已人工验证的样本
 
 **样本过滤**:
-- RUN ANALYSIS时自动跳过已在Output Path或Human Verified Path中存在的样本
+- RUN ANALYSIS样本按 `GT Labels ∩ Pred Labels ∩ Images` 收集，并自动跳过已在Output Path或Human Verified Path中存在的样本（检查 `.txt` / `_tmp.txt`）
 - 避免重复处理已修正的样本，提高效率
 
 **选择逻辑**:
@@ -1010,7 +1034,7 @@ if np.any(valid_mask):
 
 ```bash
 cd anno_refiner_app
-python main.py --port 8088
+python main.py --port 8088 --base-dir /path/to/data
 ```
 
 访问 `http://localhost:8088`
@@ -1027,8 +1051,8 @@ python main.py --port 8088
    └─ Classes File (可选): 类别映射文件
 
 2. 运行分析
-   ├─ 系统自动创建 Output Path 目录结构
-   ├─ 自动跳过已在 Output Path 或 Human Verified Path 中存在的样本
+   ├─ 分析样本按 Images ∩ GT Labels ∩ Pred Labels 收集，并跳过 Output/Human Verified 中已存在的样本
+   ├─ 系统仅确保 Output Path 根目录存在；子目录在保存标注时按需创建
    └─ 点击 "RUN ANALYSIS" → 等待完成
 
 3. 查看问题
@@ -1064,6 +1088,7 @@ refiner/
 │       ├── core/              # 核心模块
 │       │   ├── yolo_utils.py  # YOLO 转换
 │       │   ├── file_manager.py # 文件管理
+│       │   ├── path_utils.py  # Base Dir 相对路径解析
 │       │   └── analyzer.py    # Cleanlab 分析
 │       └── ui/                # 用户界面
 │           ├── components.py  # 标注组件
