@@ -1320,10 +1320,11 @@ class InteractiveAnnotator:
                 self.reset_zoom()
                 return
         
-        # Tab - cycle selection
-        if e.key.tab if hasattr(e.key, 'tab') else key_name == 'Tab':
-            self._cycle_selection()
-            return
+        # Cycle selection (prefer middle dot / backquote key)
+        if not e.modifiers.ctrl and not e.modifiers.alt and not e.modifiers.shift:
+            if key_name in ('·', '`', 'Backquote', 'Dead'):
+                self._cycle_selection()
+                return
         
         # Delete selected box
         if e.key.delete if hasattr(e.key, 'delete') else key_name == 'Delete':

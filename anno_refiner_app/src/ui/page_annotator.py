@@ -23,6 +23,7 @@ class AnnotatorPage:
     def __init__(self):
         # Auto save flag
         self.auto_save_enabled: bool = False
+        self.save_unmodified_enabled: bool = False
         
         # Current GT boxes (from annotator component)
         self.current_gt_boxes: List[BBox] = []
@@ -43,6 +44,7 @@ class AnnotatorPage:
         self.show_gt_checkbox = None
         self.show_pred_checkbox = None
         self.auto_save_checkbox = None
+        self.save_unmodified_checkbox = None
         
         # Box list panel components
         self.box_list_container = None
@@ -318,6 +320,11 @@ class AnnotatorPage:
                         value=False,
                         on_change=lambda e: setattr(self, 'auto_save_enabled', e.value)
                     ).classes('text-sm')
+                    self.save_unmodified_checkbox = ui.checkbox(
+                        'Save Unmodified',
+                        value=False,
+                        on_change=lambda e: setattr(self, 'save_unmodified_enabled', e.value)
+                    ).classes('text-sm')
                     
                     self.save_button = ui.button(
                         'Save',
@@ -338,7 +345,7 @@ class AnnotatorPage:
                 with ui.expansion('Keyboard Shortcuts', icon='keyboard').classes('w-full text-xs'):
                     with ui.column().classes('gap-1 text-gray-600'):
                         ui.label('[ / ] - Prev/Next image')
-                        ui.label('Tab - Cycle selection')
+                        ui.label('· - Cycle selection')
                         ui.label('Del/Backspace - Delete box')
                         ui.label('Arrow keys - Move box')
                         ui.label('1/2/3/4 - Set class 0/1/2/3')
@@ -609,8 +616,12 @@ class AnnotatorPage:
     
     def _before_navigate(self):
         """Called before navigating to another image"""
-        if self.auto_save_enabled and self.boxes_modified:
+        if self._should_auto_save():
             self._on_save()
+
+    def _should_auto_save(self) -> bool:
+        """Return whether auto-save should run on navigation"""
+        return self.auto_save_enabled and (self.boxes_modified or self.save_unmodified_enabled)
     
     def _handle_page_keys(self, e):
         """Handle page-level keyboard events"""

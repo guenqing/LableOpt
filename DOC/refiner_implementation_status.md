@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-01-22
 > 
-> 最新更新: 新增跳过 Cleanlab 的直接标注模式；路径必填规则调整（Images+Output）；Dashboard 实时展示各路径样本量与 Pending Samples；修复 Annotator 返回 Dashboard 需二次点击；GT/Pred 加载可选化。
+> 最新更新: 新增跳过 Cleanlab 的直接标注模式；路径必填规则调整（Images+Output）；Dashboard 实时展示各路径样本量与 Pending Samples；修复 Annotator 返回 Dashboard 需二次点击；GT/Pred 加载可选化；Annotator 快捷键 Tab 改为 ·；新增 Save Unmodified。
 
 ## 系统功能与逻辑概述
 
@@ -483,11 +483,11 @@ def _generate_visualization(self, item: IssueItem) -> str:
 │ Viewer   │Navigator │Box List  │ Control Panel              │
 │ (900x600)│(Minimap) │          │                             │
 │          │          │ GT #0    │ Display Options            │
-│ [Image]  │[Thumb]   │ GT #1    │  ☑ Show GT                 │
-│          │          │ Pred #0  │  ☑ Show Pred               │
+│ [Image]  │[Thumb]   │ GT #1    │  [ ] Show GT               │
+│          │          │ Pred #0  │  [ ] Show Pred             │
 │          │          │ ...      │                             │
 │          │          │          │ Zoom Controls               │
-│ [Prev]   │          │ [👁]     │  [1x] [+][-][Reset]         │
+│ [Prev]   │          │ [eye]    │  [1x] [+][-][Reset]         │
 │ [Next]   │          │          │  [Slider]                    │
 │          │          │          │                             │
 │          │          │          │ Box Actions                 │
@@ -496,7 +496,8 @@ def _generate_visualization(self, item: IssueItem) -> str:
 │          │          │          │  [Activate Reference]       │
 │          │          │          │                             │
 │          │          │          │ Save Controls                │
-│          │          │          │  ☑ Auto Save                │
+│          │          │          │  [ ] Auto Save              │
+│          │          │          │  [ ] Save Unmodified        │
 │          │          │          │  [Save]                     │
 │          │          │          │  [Go Back to Analysis]      │
 └──────────┴──────────┴──────────┴─────────────────────────────┘
@@ -542,6 +543,10 @@ def _on_back(self):
         # Cancel: 停留在当前页面
 ```
 
+**自动保存逻辑**:
+- Auto Save 开启时，切换图片会自动保存
+- Save Unmodified 开启时，即使未修改也会保存当前可编辑框
+
 **近期交互/兼容性修复**:
 - `Go Back to Analysis` 的确认对话框按钮回调改为直接 `await`（避免 `create_task` 丢失 client 上下文导致需要二次点击返回）
 - `_load_boxes()` 在 GT/Pred 路径为空时不再从 CWD 兜底读取标签文件（直接标注模式下 GT/Pred 允许为空）
@@ -561,7 +566,7 @@ def _on_back(self):
 ┌─────────────────────────────────────────────────────────┐
 │  导航                                                    │
 │  [ / ]       上一张/下一张图片                         │
-│  Tab          循环选中 GT 框                             │
+│  ·            循环选中可编辑框                          │
 │                                                          │
 │  缩放                                                    │
 │  = / +        放大一级                                   │
