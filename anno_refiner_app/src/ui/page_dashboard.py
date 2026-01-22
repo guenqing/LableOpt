@@ -15,7 +15,13 @@ from PIL import Image
 
 from ..state import app_state
 from ..models import IssueType, IssueItem, ClassMapping
-from ..core.file_manager import validate_paths, backup_folder, validate_output_path
+from ..core.file_manager import (
+    validate_paths,
+    backup_folder,
+    validate_output_path,
+    estimate_dashboard_counts_and_pending,
+    count_images_in_dir,
+)
 from ..core.path_utils import resolve_with_base_dir
 from ..core.analyzer import CleanlabAnalyzer
 from ..core.yolo_utils import read_yolo_label, get_image_size
@@ -49,6 +55,22 @@ class DashboardPage:
         self.gt_status = None
         self.pred_status = None
         self.output_status = None
+        self.human_status = None
+
+        # Pending analysis count
+        self.pending_count = None
+        self.pending_detail = None
+
+        # Count labels under inputs
+        self.images_count_label = None
+        self.gt_count_label = None
+        self.pred_count_label = None
+        self.output_count_label = None
+        self.human_count_label = None
+
+        # Simple cache to avoid rescanning huge Images Path
+        self._cached_images_path = None
+        self._cached_images_count = None
         
         # TopK input
         self.topk_input = None
@@ -125,18 +147,21 @@ class DashboardPage:
                 with ui.row().classes('w-full items-center gap-1'):
                     self.images_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
                     self.images_status = ui.label('').classes('text-xs whitespace-nowrap')
+                self.images_count_label = ui.label('').classes('text-[10px] text-gray-400')
                 
                 # GT Labels path
-                ui.label('GT Labels Path').classes('text-xs font-medium text-gray-500')
+                ui.label('GT Labels Path (opt)').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
                     self.gt_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
                     self.gt_status = ui.label('').classes('text-xs whitespace-nowrap')
+                self.gt_count_label = ui.label('').classes('text-[10px] text-gray-400')
                 
                 # Pred Labels path
-                ui.label('Pred Labels Path').classes('text-xs font-medium text-gray-500')
+                ui.label('Pred Labels Path (opt)').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
                     self.pred_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
                     self.pred_status = ui.label('').classes('text-xs whitespace-nowrap')
+                self.pred_count_label = ui.label('').classes('text-[10px] text-gray-400')
 
                 # Parse progress (for path validation)
                 self.parse_progress_label = ui.label('').classes('text-[10px] text-gray-400')
@@ -149,14 +174,24 @@ class DashboardPage:
                 with ui.row().classes('w-full items-center gap-1'):
                     self.output_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
                     self.output_status = ui.label('').classes('text-xs whitespace-nowrap')
+                self.output_count_label = ui.label('').classes('text-[10px] text-gray-400')
                 
                 # Human Verified Annotation Path
                 ui.label('Human Verified Annotation Path (opt)').classes('text-xs font-medium text-gray-500')
-                self.human_verified_input = ui.input().classes('w-full').props('dense outlined size=small placeholder="relative to base dir"')
+                with ui.row().classes('w-full items-center gap-1'):
+                    self.human_verified_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
+                    self.human_status = ui.label('').classes('text-xs whitespace-nowrap')
+                self.human_count_label = ui.label('').classes('text-[10px] text-gray-400')
                 
                 # Classes file
                 ui.label('Classes File (opt)').classes('text-xs font-medium text-gray-500')
                 self.classes_input = ui.input().classes('w-full').props('dense outlined size=small')
+
+                # Pending analysis samples
+                with ui.row().classes('w-full items-center justify-between mt-1'):
+                    ui.label('Pending Samples').classes('text-xs font-medium text-gray-500')
+                    self.pending_count = ui.label('--').classes('text-lg font-bold text-indigo-700')
+                self.pending_detail = ui.label('').classes('text-[10px] text-gray-400')
                 
                 ui.separator().classes('my-2')
                 
@@ -267,6 +302,7 @@ class DashboardPage:
         """Handle output path input change"""
         self._sync_paths_to_config()
         self._validate_output_path()
+        self._schedule_validate_paths()
 
     def _to_abs(self, user_value: str) -> str:
         return resolve_with_base_dir(app_state.config.base_dir, user_value or '')
@@ -325,15 +361,114 @@ class DashboardPage:
         # debounce typing
         await asyncio.sleep(0.2)
 
-        images_path = app_state.config.images_path or ''
-        gt_path = app_state.config.gt_labels_path or ''
-        pred_path = app_state.config.pred_labels_path or ''
+        images_path = (app_state.config.images_path or '').strip()
+        gt_path = (app_state.config.gt_labels_path or '').strip()
+        pred_path = (app_state.config.pred_labels_path or '').strip()
+        output_path = (app_state.config.output_path or '').strip()
+        human_path = (app_state.config.human_verified_path or '').strip()
 
-        self.images_status.text = ''
-        self.gt_status.text = ''
-        self.pred_status.text = ''
+        # Track Images Path cache invalidation
+        if not images_path:
+            self._cached_images_path = None
+            self._cached_images_count = None
+        elif self._cached_images_path != images_path:
+            self._cached_images_path = images_path
+            self._cached_images_count = None
 
-        if not images_path or not gt_path or not pred_path:
+        # Clear count labels on empty inputs immediately
+        if self.images_count_label and not images_path:
+            self.images_count_label.text = ''
+        if self.gt_count_label and not gt_path:
+            self.gt_count_label.text = ''
+        if self.pred_count_label and not pred_path:
+            self.pred_count_label.text = ''
+        if self.output_count_label and not output_path:
+            self.output_count_label.text = ''
+        if self.human_count_label and not human_path:
+            self.human_count_label.text = ''
+
+        # Quick per-path existence feedback (immediate, before heavy counting)
+        try:
+            if self.images_status:
+                if not images_path:
+                    self.images_status.text = ''
+                elif Path(images_path).exists():
+                    self.images_status.text = 'OK'
+                    self.images_status.classes(remove='text-red-500', add='text-green-600')
+                    if self.images_count_label:
+                        if self._cached_images_count is not None:
+                            self.images_count_label.text = f'{int(self._cached_images_count)} imgs'
+                        else:
+                            self.images_count_label.text = 'Counting...'
+                else:
+                    self.images_status.text = 'Not found'
+                    self.images_status.classes(remove='text-green-600', add='text-red-500')
+                    if self.images_count_label:
+                        self.images_count_label.text = ''
+
+            if self.gt_status:
+                if not gt_path:
+                    self.gt_status.text = ''
+                elif Path(gt_path).exists():
+                    self.gt_status.text = 'OK'
+                    self.gt_status.classes(remove='text-red-500', add='text-green-600')
+                    if self.gt_count_label:
+                        self.gt_count_label.text = 'Counting...'
+                else:
+                    self.gt_status.text = 'Not found'
+                    self.gt_status.classes(remove='text-green-600', add='text-red-500')
+                    if self.gt_count_label:
+                        self.gt_count_label.text = ''
+
+            if self.pred_status:
+                if not pred_path:
+                    self.pred_status.text = ''
+                elif Path(pred_path).exists():
+                    self.pred_status.text = 'OK'
+                    self.pred_status.classes(remove='text-red-500', add='text-green-600')
+                    if self.pred_count_label:
+                        self.pred_count_label.text = 'Counting...'
+                else:
+                    self.pred_status.text = 'Not found'
+                    self.pred_status.classes(remove='text-green-600', add='text-red-500')
+                    if self.pred_count_label:
+                        self.pred_count_label.text = ''
+
+            if self.human_status:
+                if not human_path:
+                    self.human_status.text = ''
+                elif Path(human_path).exists():
+                    self.human_status.text = 'OK'
+                    self.human_status.classes(remove='text-red-500', add='text-green-600')
+                    if self.human_count_label:
+                        self.human_count_label.text = 'Counting...'
+                else:
+                    self.human_status.text = 'Not found'
+                    self.human_status.classes(remove='text-green-600', add='text-red-500')
+                    if self.human_count_label:
+                        self.human_count_label.text = ''
+
+            if self.output_count_label:
+                if output_path:
+                    self.output_count_label.text = 'Counting...'
+        except RuntimeError:
+            # client disconnected
+            return
+
+        # If nothing is provided, clear pending and return quickly.
+        if not any([images_path, gt_path, pred_path, output_path, human_path]):
+            if self.images_status:
+                self.images_status.text = ''
+            if self.gt_status:
+                self.gt_status.text = ''
+            if self.pred_status:
+                self.pred_status.text = ''
+            if self.human_status:
+                self.human_status.text = ''
+            if self.pending_count:
+                self.pending_count.text = '--'
+            if self.pending_detail:
+                self.pending_detail.text = ''
             if self.parse_progress_bar:
                 self.parse_progress_bar.visible = False
             if self.parse_progress_label:
@@ -348,16 +483,130 @@ class DashboardPage:
         start_time = time.time()
         try:
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: validate_paths(images_path, gt_path, pred_path))
-            app_state.path_validation = result
-            self._apply_path_validation_result(result)
+            stats = await loop.run_in_executor(
+                None,
+                lambda: estimate_dashboard_counts_and_pending(
+                    images_path=images_path,
+                    gt_labels_path=gt_path,
+                    pred_labels_path=pred_path,
+                    output_path=output_path,
+                    human_verified_path=human_path,
+                    known_images_count=self._cached_images_count,
+                    include_images_count=False,
+                ),
+            )
+
+            # Status + counts for Images/GT/Pred/Human (Output status is handled separately)
+            if self.images_status:
+                if not images_path:
+                    self.images_status.text = ''
+                elif stats.get('images_exists'):
+                    self.images_status.text = 'OK'
+                    self.images_status.classes(remove='text-red-500', add='text-green-600')
+                else:
+                    self.images_status.text = 'Not found'
+                    self.images_status.classes(remove='text-green-600', add='text-red-500')
+            if self.images_count_label:
+                if not stats.get('images_exists'):
+                    self.images_count_label.text = ''
+                elif stats.get('images_count') is not None:
+                    self.images_count_label.text = f'{int(stats["images_count"])} imgs'
+
+            # Update cache after a successful count
+            if images_path and stats.get('images_exists') and stats.get('images_count') is not None:
+                self._cached_images_path = images_path
+                self._cached_images_count = int(stats['images_count'])
+
+            if self.gt_status:
+                if not gt_path:
+                    self.gt_status.text = ''
+                elif stats.get('gt_exists'):
+                    self.gt_status.text = 'OK'
+                    self.gt_status.classes(remove='text-red-500', add='text-green-600')
+                else:
+                    self.gt_status.text = 'Not found'
+                    self.gt_status.classes(remove='text-green-600', add='text-red-500')
+            if self.gt_count_label:
+                if stats.get('gt_exists') and stats.get('gt_count') is not None:
+                    self.gt_count_label.text = f'{int(stats["gt_count"])} files'
+                else:
+                    self.gt_count_label.text = ''
+
+            if self.pred_status:
+                if not pred_path:
+                    self.pred_status.text = ''
+                elif stats.get('pred_exists'):
+                    self.pred_status.text = 'OK'
+                    self.pred_status.classes(remove='text-red-500', add='text-green-600')
+                else:
+                    self.pred_status.text = 'Not found'
+                    self.pred_status.classes(remove='text-green-600', add='text-red-500')
+            if self.pred_count_label:
+                if stats.get('pred_exists') and stats.get('pred_count') is not None:
+                    self.pred_count_label.text = f'{int(stats["pred_count"])} files'
+                else:
+                    self.pred_count_label.text = ''
+
+            if self.human_status:
+                if not human_path:
+                    self.human_status.text = ''
+                elif stats.get('human_exists'):
+                    self.human_status.text = 'OK'
+                    self.human_status.classes(remove='text-red-500', add='text-green-600')
+                else:
+                    self.human_status.text = 'Not found'
+                    self.human_status.classes(remove='text-green-600', add='text-red-500')
+            if self.human_count_label:
+                if stats.get('human_set'):
+                    self.human_count_label.text = f'processed: {int(stats.get("human_processed") or 0)}'
+                else:
+                    self.human_count_label.text = ''
+
+            if self.output_count_label:
+                if stats.get('output_set'):
+                    self.output_count_label.text = f'processed: {int(stats.get("output_processed") or 0)}'
+                else:
+                    self.output_count_label.text = ''
+
+            # Pending (generalized; can work without Pred)
+            pending = stats.get('pending')
+            if self.pending_count:
+                self.pending_count.text = '--' if pending is None else str(int(pending))
+            if self.pending_detail:
+                mode = stats.get('pending_mode') or ''
+                if pending is None:
+                    if not images_path:
+                        self.pending_detail.text = 'Fill Images to compute'
+                    elif not output_path:
+                        self.pending_detail.text = 'Fill Output to compute'
+                    else:
+                        self.pending_detail.text = 'Pending not available'
+                else:
+                    skipped = int(stats.get('pending_skipped') or 0)
+                    missing_img = int(stats.get('pending_missing_img') or 0)
+                    self.pending_detail.text = f'mode={mode} skipped={skipped} missing_img={missing_img}'
+
+            # Count Images in background (can be expensive on huge dirs); do it after fast stats.
+            if images_path and stats.get('images_exists') and self._cached_images_count is None:
+                try:
+                    img_count = await loop.run_in_executor(None, lambda: count_images_in_dir(images_path))
+                    self._cached_images_path = images_path
+                    self._cached_images_count = int(img_count)
+                    if self.images_count_label:
+                        self.images_count_label.text = f'{int(img_count)} imgs'
+                except asyncio.CancelledError:
+                    return
+                except Exception:
+                    # keep existing display
+                    pass
 
             elapsed = time.time() - start_time
             import logging
             logging.getLogger(__name__).info(
                 f'Path parsing done in {elapsed:.3f}s: '
-                f'imgs={result.get("images_count")} gt={result.get("gt_count")} pred={result.get("pred_count")} '
-                f'valid={result.get("valid")}'
+                f'imgs={stats.get("images_count")} gt={stats.get("gt_count")} pred={stats.get("pred_count")} '
+                f'out={stats.get("output_processed")} human={stats.get("human_processed")} '
+                f'pending={stats.get("pending")} mode={stats.get("pending_mode")}'
             )
         except asyncio.CancelledError:
             return
@@ -445,16 +694,26 @@ class DashboardPage:
             return
 
         # Lightweight validation (avoid scanning huge directories on click)
-        images_path = app_state.config.images_path or ''
-        gt_path = app_state.config.gt_labels_path or ''
-        pred_path = app_state.config.pred_labels_path or ''
-        if not images_path or not Path(images_path).exists():
+        images_path = (app_state.config.images_path or '').strip()
+        gt_path = (app_state.config.gt_labels_path or '').strip()
+        pred_path = (app_state.config.pred_labels_path or '').strip()
+
+        # Enforce: analysis requires Images + GT + Pred
+        if not images_path or not gt_path or not pred_path:
+            self._safe_notify(
+                'RUN ANALYSIS requires Images Path, GT Labels Path, and Pred Labels Path.',
+                type='warning',
+                timeout=5000,
+            )
+            return
+
+        if not Path(images_path).exists():
             self._safe_notify('Images Path not found. Please check the path.', type='negative')
             return
-        if not gt_path or not Path(gt_path).exists():
+        if not Path(gt_path).exists():
             self._safe_notify('GT Labels Path not found. Please check the path.', type='negative')
             return
-        if not pred_path or not Path(pred_path).exists():
+        if not Path(pred_path).exists():
             self._safe_notify('Pred Labels Path not found. Please check the path.', type='negative')
             return
         
@@ -586,10 +845,17 @@ class DashboardPage:
                 else:
                     self.run_button.enable()
             if self.goto_button:
-                if app_state.analysis_complete and (not app_state.is_analyzing):
+                if app_state.is_analyzing:
+                    self.goto_button.disable()
+                elif app_state.analysis_complete:
                     self.goto_button.enable()
                 else:
-                    self.goto_button.disable()
+                    images_path = (app_state.config.images_path or '').strip()
+                    output_path = (app_state.config.output_path or '').strip()
+                    if images_path and Path(images_path).exists() and output_path:
+                        self.goto_button.enable()
+                    else:
+                        self.goto_button.disable()
             if self.refresh_button:
                 if app_state.analysis_complete and (not app_state.is_analyzing):
                     self.refresh_button.enable()
@@ -730,33 +996,106 @@ class DashboardPage:
     
     def _goto_annotation(self):
         """Navigate to annotation page"""
-        # Ensure checkbox states are synced to app_state (fix selection logic)
-        app_state.selected_overlooked = self.overlooked_checkbox.value
-        app_state.selected_swapped = self.swapped_checkbox.value
-        app_state.selected_bad_located = self.badloc_checkbox.value
-        
-        # Get topK value and apply it when building annotation queue
-        top_k = int(self.topk_input.value) if self.topk_input.value else 10
-        
-        # Build annotation queue based on selected types
-        app_state.annotation_queue = app_state.get_selected_issues(top_k=top_k)
-        app_state.current_annotation_index = 0
-        
-        if not app_state.annotation_queue:
-            ui.notify('No issues selected. Please select at least one issue type.', type='warning')
+        # Always require Images Path + Output Path (even when skipping analysis)
+        images_path = (app_state.config.images_path or '').strip()
+        output_path = (app_state.config.output_path or '').strip()
+        if not images_path:
+            ui.notify('Images Path is required.', type='warning')
             return
-        
-        # Show summary of selected types
-        selected_types = []
-        if app_state.selected_overlooked:
-            selected_types.append('Overlooked')
-        if app_state.selected_swapped:
-            selected_types.append('Swapped')
-        if app_state.selected_bad_located:
-            selected_types.append('Bad Located')
-        
-        type_str = ', '.join(selected_types)
-        ui.notify(f'Starting with {len(app_state.annotation_queue)} samples from {type_str} (TopK={top_k})', type='info')
+        if not Path(images_path).exists():
+            ui.notify('Images Path not found. Please check the path.', type='negative')
+            return
+        if not output_path:
+            ui.notify('Output Path is required.', type='warning')
+            return
+
+        # Ensure output root exists for saving tmp files
+        try:
+            Path(output_path).mkdir(parents=True, exist_ok=True)
+        except Exception as ex:
+            ui.notify(f'Failed to create Output Path: {ex}', type='negative')
+            return
+
+        # If analysis has been run, keep the original behavior (issue-based queue)
+        if app_state.analysis_complete:
+            # Ensure checkbox states are synced to app_state (fix selection logic)
+            app_state.selected_overlooked = self.overlooked_checkbox.value
+            app_state.selected_swapped = self.swapped_checkbox.value
+            app_state.selected_bad_located = self.badloc_checkbox.value
+
+            # Get topK value and apply it when building annotation queue
+            top_k = int(self.topk_input.value) if self.topk_input.value else 10
+
+            # Build annotation queue based on selected types
+            app_state.annotation_queue = app_state.get_selected_issues(top_k=top_k)
+            app_state.current_annotation_index = 0
+
+            if not app_state.annotation_queue:
+                ui.notify('No issues selected. Please select at least one issue type.', type='warning')
+                return
+
+            # Show summary of selected types
+            selected_types = []
+            if app_state.selected_overlooked:
+                selected_types.append('Overlooked')
+            if app_state.selected_swapped:
+                selected_types.append('Swapped')
+            if app_state.selected_bad_located:
+                selected_types.append('Bad Located')
+
+            type_str = ', '.join(selected_types)
+            ui.notify(
+                f'Starting with {len(app_state.annotation_queue)} samples from {type_str} (TopK={top_k})',
+                type='info'
+            )
+            ui.navigate.to('/annotator')
+            return
+
+        # Otherwise, allow direct annotation without cleanlab analysis.
+        gt_path = (app_state.config.gt_labels_path or '').strip()
+        pred_path = (app_state.config.pred_labels_path or '').strip()
+        human_verified_path = (app_state.config.human_verified_path or '').strip()
+
+        if gt_path and not Path(gt_path).exists():
+            ui.notify('GT Labels Path not found. Please check the path.', type='negative')
+            return
+        if pred_path and not Path(pred_path).exists():
+            ui.notify('Pred Labels Path not found. Please check the path.', type='negative')
+            return
+
+        if human_verified_path and not Path(human_verified_path).exists():
+            ui.notify('Human Verified Path not found; it will be ignored.', type='warning')
+            human_verified_path = ''
+
+        try:
+            from ..core.file_manager import collect_annotation_image_paths
+            rels = collect_annotation_image_paths(
+                images_path=images_path,
+                gt_labels_path=gt_path,
+                pred_labels_path=pred_path,
+                output_path=output_path,
+                human_verified_path=human_verified_path,
+            )
+        except Exception as ex:
+            ui.notify(f'Failed to build annotation queue: {ex}', type='negative', timeout=5000)
+            return
+
+        if not rels:
+            ui.notify('No samples found after applying intersection and skip rules.', type='warning')
+            return
+
+        from ..models import IssueItem, IssueType
+        app_state.annotation_queue = [
+            IssueItem(
+                image_path=p,
+                issue_type=IssueType.DIRECT,
+                score=1.0,
+                box_index=None,
+            )
+            for p in rels
+        ]
+        app_state.current_annotation_index = 0
+        ui.notify(f'Starting annotation with {len(app_state.annotation_queue)} samples', type='info')
         ui.navigate.to('/annotator')
 
 

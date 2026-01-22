@@ -1,6 +1,7 @@
 """
 Annotator page - Interactive annotation editing interface
 """
+import asyncio
 from pathlib import Path
 from typing import List, Optional
 import logging
@@ -10,7 +11,7 @@ from nicegui import ui
 from ..state import app_state
 from ..models import BBox, BoxSource, IssueItem, IssueType
 from ..core.yolo_utils import read_yolo_label, get_image_size
-from ..core.file_manager import save_tmp_annotation, confirm_changes, get_tmp_files
+from ..core.file_manager import save_tmp_annotation, get_tmp_files, confirm_changes_for_tmp_files
 from .components import InteractiveAnnotator
 
 logger = logging.getLogger(__name__)
@@ -417,26 +418,31 @@ class AnnotatorPage:
         img_path = Path(app_state.config.images_path) / rel_path
         img_w, img_h = get_image_size(img_path)
         
-        # GT labels - load from Output Path (check for tmp file first, then .txt, fallback to GT Labels Path)
-        output_path = Path(app_state.config.output_path)
-        output_label_path = output_path / rel_path.with_suffix('.txt')
-        output_tmp_path = output_path / rel_path.parent / f'{rel_path.stem}_tmp.txt'
+        # GT labels - load from Output Path (check for tmp file first, then .txt, fallback to GT Labels Path if set)
+        output_path = Path(app_state.config.output_path) if (app_state.config.output_path or '').strip() else None
+        output_label_path = (output_path / rel_path.with_suffix('.txt')) if output_path else None
+        output_tmp_path = (output_path / rel_path.parent / f'{rel_path.stem}_tmp.txt') if output_path else None
         
         gt_raw = []
-        if output_tmp_path.exists():
+        if output_tmp_path and output_tmp_path.exists():
             # Load from tmp file in output path
             gt_raw = read_yolo_label(output_tmp_path, img_w, img_h, has_confidence=False)
-        elif output_label_path.exists():
+        elif output_label_path and output_label_path.exists():
             # Load from .txt file in output path
             gt_raw = read_yolo_label(output_label_path, img_w, img_h, has_confidence=False)
         else:
-            # Fallback to original GT labels path
-            gt_label_path = Path(app_state.config.gt_labels_path) / rel_path.with_suffix('.txt')
-            gt_raw = read_yolo_label(gt_label_path, img_w, img_h, has_confidence=False)
+            # Fallback to original GT labels path (only if configured)
+            gt_labels_root = (app_state.config.gt_labels_path or '').strip()
+            if gt_labels_root and Path(gt_labels_root).exists():
+                gt_label_path = Path(gt_labels_root) / rel_path.with_suffix('.txt')
+                gt_raw = read_yolo_label(gt_label_path, img_w, img_h, has_confidence=False)
         
-        # Pred labels
-        pred_label_path = Path(app_state.config.pred_labels_path) / rel_path.with_suffix('.txt')
-        pred_raw = read_yolo_label(pred_label_path, img_w, img_h, has_confidence=True)
+        # Pred labels (only if configured)
+        pred_raw = []
+        pred_labels_root = (app_state.config.pred_labels_path or '').strip()
+        if pred_labels_root and Path(pred_labels_root).exists():
+            pred_label_path = Path(pred_labels_root) / rel_path.with_suffix('.txt')
+            pred_raw = read_yolo_label(pred_label_path, img_w, img_h, has_confidence=True)
         
         # Convert to BBox objects
         # GT boxes: editable=True (can be edited)
@@ -623,20 +629,28 @@ class AnnotatorPage:
             self._on_next()
             return
     
-    def _on_back(self):
+    async def _on_back(self):
         """Handle back button click"""
-        # Check for any tmp files in output path
-        tmp_files = get_tmp_files(app_state.config.output_path)
-        
+        # Scanning output dir can be expensive; do it off the event loop.
+        try:
+            loop = asyncio.get_event_loop()
+            tmp_files = await loop.run_in_executor(
+                None, lambda: get_tmp_files(app_state.config.output_path)
+            )
+        except Exception as ex:
+            self._safe_notify(f'读取临时文件失败: {ex}', type='negative')
+            logger.error(f'Failed to list tmp files: {ex}')
+            return
+
         if not tmp_files:
             # No modifications, go directly back
-            ui.navigate.to('/')
+            self._safe_navigate('/')
             return
-        
+
         # Show confirmation dialog
-        self._show_confirm_dialog(len(tmp_files))
+        self._show_confirm_dialog(len(tmp_files), tmp_files)
     
-    def _show_confirm_dialog(self, modified_count: int):
+    def _show_confirm_dialog(self, modified_count: int, tmp_files: List[str]):
         """Show confirmation dialog for changes"""
         with ui.dialog() as dialog, ui.card().classes('w-96'):
             with ui.column().classes('w-full gap-4 p-4'):
@@ -646,10 +660,16 @@ class AnnotatorPage:
                 ui.label('How would you like to proceed?').classes('text-gray-600')
                 
                 ui.separator()
+
+                async def _keep_and_back() -> None:
+                    await self._confirm_and_navigate(dialog, tmp_files, True)
+
+                async def _discard_and_back() -> None:
+                    await self._confirm_and_navigate(dialog, tmp_files, False)
                 
                 # Yes - Keep Changes
                 with ui.button(
-                    on_click=lambda: self._confirm_and_navigate(dialog, True)
+                    on_click=_keep_and_back
                 ).classes('w-full').props('color=positive'):
                     with ui.column().classes('items-center gap-0'):
                         ui.label('Yes - Keep Changes').classes('font-medium')
@@ -657,7 +677,7 @@ class AnnotatorPage:
                 
                 # No - Discard Changes
                 with ui.button(
-                    on_click=lambda: self._confirm_and_navigate(dialog, False)
+                    on_click=_discard_and_back
                 ).classes('w-full').props('color=negative'):
                     with ui.column().classes('items-center gap-0'):
                         ui.label('No - Discard Changes').classes('font-medium')
@@ -671,23 +691,51 @@ class AnnotatorPage:
         
         dialog.open()
     
-    def _confirm_and_navigate(self, dialog, keep_changes: bool):
-        """Confirm changes and navigate back"""
-        dialog.close()
-        
+    async def _confirm_and_navigate(self, dialog, tmp_files: List[str], keep_changes: bool):
+        """Confirm changes and navigate back without blocking the UI."""
         try:
-            confirm_changes(app_state.config.output_path, keep_changes=keep_changes)
-            
+            dialog.close()
+        except Exception:
+            pass
+
+        # Show a lightweight "working" hint; avoid crashing if client disconnects.
+        self._safe_notify('正在处理更改，请稍候...', type='info', timeout=2000)
+
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: confirm_changes_for_tmp_files(
+                    app_state.config.output_path,
+                    tmp_files,
+                    keep_changes=keep_changes,
+                ),
+            )
+
             if keep_changes:
-                ui.notify('Changes saved successfully', type='positive')
+                self._safe_notify('更改已保存', type='positive')
             else:
-                ui.notify('Changes discarded', type='info')
+                self._safe_notify('已丢弃更改', type='info')
         except Exception as ex:
-            ui.notify(f'Error: {ex}', type='negative')
+            self._safe_notify(f'处理更改失败: {ex}', type='negative', timeout=5000)
             logger.error(f'Error confirming changes: {ex}')
             return
-        
-        ui.navigate.to('/')
+
+        self._safe_navigate('/')
+
+    def _safe_notify(self, message: str, type: str = 'info', timeout: int = 3000) -> None:
+        """Notify if a client is available; otherwise ignore."""
+        try:
+            ui.notify(message, type=type, timeout=timeout)
+        except RuntimeError:
+            return
+
+    def _safe_navigate(self, path: str) -> None:
+        """Navigate if a client is available; otherwise ignore."""
+        try:
+            ui.navigate.to(path)
+        except RuntimeError:
+            return
 
 
 def create_annotator():

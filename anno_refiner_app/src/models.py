@@ -9,6 +9,7 @@ class IssueType(Enum):
     OVERLOOKED = "overlooked"
     SWAPPED = "swapped"
     BAD_LOCATED = "bad_located"
+    DIRECT = "direct"
 
 
 class BoxSource(Enum):
