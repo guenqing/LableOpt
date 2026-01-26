@@ -24,6 +24,7 @@ class AnnotatorPage:
         # Auto save flag
         self.auto_save_enabled: bool = False
         self.save_unmodified_enabled: bool = False
+        self.auto_focus_enabled: bool = True
         
         # Current GT boxes (from annotator component)
         self.current_gt_boxes: List[BBox] = []
@@ -43,6 +44,7 @@ class AnnotatorPage:
         self.zoom_slider = None
         self.show_gt_checkbox = None
         self.show_pred_checkbox = None
+        self.auto_focus_checkbox = None
         self.auto_save_checkbox = None
         self.save_unmodified_checkbox = None
         
@@ -254,6 +256,11 @@ class AnnotatorPage:
                 # Display Options
                 ui.label('Display Options').classes('text-sm font-bold text-gray-700')
                 with ui.column().classes('gap-1'):
+                    self.auto_focus_checkbox = ui.checkbox(
+                        'Auto Focus',
+                        value=True,
+                        on_change=self._on_auto_focus_change,
+                    ).classes('text-sm')
                     self.show_gt_checkbox = ui.checkbox(
                         'Show GT', 
                         value=True,
@@ -390,7 +397,10 @@ class AnnotatorPage:
         # Auto-focus on boxes after loading image and boxes
         # auto_focus_boxes() will call on_zoom_change callback to update UI
         if self.annotator.image_width > 0 and self.annotator.image_height > 0:
-            self.annotator.auto_focus_boxes()
+            if self.auto_focus_enabled:
+                self.annotator.auto_focus_boxes()
+            else:
+                self.annotator.reset_zoom()
         
         # Update navigation buttons
         self._update_nav_buttons()
@@ -416,6 +426,18 @@ class AnnotatorPage:
         self.issue_info_label.text = f'{issue_type} | Score: {item.score:.4f}'
         self.issue_info_label.classes(remove='text-orange-600 text-red-600 text-purple-600')
         self.issue_info_label.classes(add=f'text-{color}-600 font-medium')
+
+    def _on_auto_focus_change(self, e) -> None:
+        """Handle auto focus checkbox change."""
+        self.auto_focus_enabled = bool(e.value)
+        if not self.annotator:
+            return
+        if self.annotator.image_width <= 0 or self.annotator.image_height <= 0:
+            return
+        if self.auto_focus_enabled:
+            self.annotator.auto_focus_boxes()
+        else:
+            self.annotator.reset_zoom()
     
     def _load_boxes(self, item: IssueItem) -> tuple:
         """Load GT and Pred boxes for an item"""

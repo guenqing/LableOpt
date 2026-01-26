@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-01-23
 > 
-> 最新更新: Dashboard 改为手动 `Parse Data` 解析；Pending 口径改为集合论缺省视为全集并输出 missing_img；路径必填规则调整（Images+Output）；修复 Annotator 返回 Dashboard 需二次点击；GT/Pred 加载可选化；Annotator 快捷键 Tab 改为 ·；新增 Save Unmodified。
+> 最新更新: Annotator 新增 Auto Focus 可选开关；Dashboard 改为手动 `Parse Data` 解析；Pending 口径改为集合论缺省视为全集并输出 missing_img；路径必填规则调整（Images+Output）；修复 Annotator 返回 Dashboard 需二次点击；GT/Pred 加载可选化；Annotator 快捷键 Tab 改为 ·；新增 Save Unmodified。
 
 ## 系统功能与逻辑概述
 
@@ -482,8 +482,9 @@ def _generate_visualization(self, item: IssueItem) -> str:
 │ Viewer   │Navigator │Box List  │ Control Panel              │
 │ (900x600)│(Minimap) │          │                             │
 │          │          │ GT #0    │ Display Options            │
-│ [Image]  │[Thumb]   │ GT #1    │  [ ] Show GT               │
-│          │          │ Pred #0  │  [ ] Show Pred             │
+│ [Image]  │[Thumb]   │ GT #1    │  [ ] Auto Focus            │
+│          │          │ Pred #0  │  [ ] Show GT               │
+│          │          │ ...      │  [ ] Show Pred             │
 │          │          │ ...      │                             │
 │          │          │          │ Zoom Controls               │
 │ [Prev]   │          │ [eye]    │  [1x] [+][-][Reset]         │
@@ -961,7 +962,7 @@ def set_zoom(self, zoom: float, focus_point: tuple = None):
 
 #### 自动聚焦功能
 
-系统在加载图片和标注框后，会自动计算并设置最合适的初始视野中心和放大倍率，直达最方便标注的状态。
+系统在加载图片和标注框后，可根据 `Auto Focus` 勾选状态决定是否自动聚焦或保持 1x 显示。
 
 **实现原理**:
 
@@ -997,8 +998,8 @@ def auto_focus_boxes(self) -> None:
 ```
 
 **触发时机**:
-- 在 `_load_current_image()` 中，加载完图片和框后自动调用
-- 确保每次切换图片时都能自动聚焦到标注区域
+- 在 `_load_current_image()` 中，加载完图片和框后触发
+- `Auto Focus` 勾选时执行自动聚焦，取消勾选时重置到 1x
 
 **优势**:
 - 无需手动缩放和定位，提高标注效率
