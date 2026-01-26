@@ -1,4 +1,4 @@
-# Refiner 使用说明
+# Annotation Refiner 使用说明
 
 > 最后更新: 2026-01-23
 > 
