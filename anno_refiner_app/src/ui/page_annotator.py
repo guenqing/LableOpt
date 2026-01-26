@@ -106,7 +106,7 @@ class AnnotatorPage:
             ui.icon('inbox', size='64px').classes('text-gray-300')
             ui.label('No samples in annotation queue').classes('text-xl text-gray-500 mt-4')
             ui.label('Please run analysis and select issues from the dashboard first.').classes('text-gray-400')
-            ui.button('Back to Dashboard', on_click=lambda: ui.navigate.to('/')).classes('mt-6')
+            ui.button('Back to Dashboard', on_click=lambda: ui.navigate.to('/')).classes('mt-6').tooltip('返回仪表盘')
     
     def _create_header(self):
         """Create header bar with title and navigation info"""
@@ -141,13 +141,13 @@ class AnnotatorPage:
                     'Prev', 
                     icon='chevron_left',
                     on_click=self._on_prev
-                ).props('outline')
+                ).props('outline').tooltip('上一个样本')
                 
                 self.next_button = ui.button(
                     'Next',
                     icon='chevron_right',
                     on_click=self._on_next
-                ).props('outline icon-right')
+                ).props('outline icon-right').tooltip('下一个样本')
     
     def _create_navigator_area(self):
         """Create the Navigator (minimap) area"""
@@ -279,12 +279,12 @@ class AnnotatorPage:
                 with ui.column().classes('gap-2 w-full'):
                     with ui.row().classes('items-center gap-2'):
                         self.zoom_label = ui.label('1x').classes('text-sm font-mono w-8')
-                        ui.button(icon='remove', on_click=self._zoom_out).props('flat dense size=sm')
-                        ui.button(icon='add', on_click=self._zoom_in).props('flat dense size=sm')
-                        ui.button('Reset', on_click=self._zoom_reset).props('flat dense size=sm')
+                        ui.button(icon='remove', on_click=self._zoom_out).props('flat dense size=sm').tooltip('缩小')
+                        ui.button(icon='add', on_click=self._zoom_in).props('flat dense size=sm').tooltip('放大')
+                        ui.button('Reset', on_click=self._zoom_reset).props('flat dense size=sm').tooltip('重置缩放')
                     
                     self.zoom_slider = ui.slider(
-                        min=1, max=10, step=1, value=1,
+                        min=1, max=20, step=0.2, value=1,
                         on_change=self._on_zoom_slider
                     ).classes('w-full')
                 
@@ -298,7 +298,7 @@ class AnnotatorPage:
                         icon='swap_horiz',
                         on_click=self._on_swap_editable
                     ).classes('w-full text-xs').props('outline dense').tooltip(
-                        'Swap editable status: editable boxes become reference, reference boxes become editable'
+                        '交换可编辑状态：可编辑框变为参考框，参考框变为可编辑框'
                     )
                     
                     ui.button(
@@ -306,7 +306,7 @@ class AnnotatorPage:
                         icon='delete_sweep',
                         on_click=self._on_clear_editable
                     ).classes('w-full text-xs').props('outline dense color=negative').tooltip(
-                        'Delete all editable boxes'
+                        '删除所有可编辑框'
                     )
                     
                     ui.button(
@@ -314,7 +314,7 @@ class AnnotatorPage:
                         icon='check_circle',
                         on_click=self._on_activate_reference
                     ).classes('w-full text-xs').props('outline dense color=positive').tooltip(
-                        'Make all reference boxes editable'
+                        '将所有参考框变为可编辑'
                     )
                 
                 ui.separator()
@@ -337,7 +337,7 @@ class AnnotatorPage:
                         'Save',
                         icon='save',
                         on_click=self._on_save
-                    ).classes('w-full')
+                    ).classes('w-full').tooltip('保存标注')
                 
                 ui.separator()
                 
@@ -539,7 +539,7 @@ class AnnotatorPage:
     
     def _on_zoom_changed(self, zoom: float):
         """Handle zoom change from annotator"""
-        self.zoom_label.text = f'{int(zoom)}x'
+        self.zoom_label.text = f'{zoom:.1f}x'
         if self.zoom_slider:
             self.zoom_slider.value = zoom
     

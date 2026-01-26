@@ -7,11 +7,7 @@ import os
 import time
 from pathlib import Path
 from nicegui import ui, app
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from PIL import Image
+# matplotlib and PIL imports are moved inside _generate_visualization to avoid DLL loading issues
 
 from ..state import app_state
 from ..models import IssueType, IssueItem, ClassMapping
@@ -195,14 +191,14 @@ class DashboardPage:
                     'Parse Data',
                     on_click=self._on_parse_data,
                     icon='auto_fix_high'
-                ).classes('w-full').props('color=negative')
+                ).classes('w-full').props('color=negative').tooltip('手动触发路径解析与统计')
 
                 # Run button
                 self.run_button = ui.button(
                     'RUN ANALYSIS',
                     on_click=self._run_analysis,
                     icon='play_arrow'
-                ).classes('w-full').props('color=primary')
+                ).classes('w-full').props('color=primary').tooltip('运行分析（需设置Images、GT、Pred路径）')
                 
                 # Progress
                 self.progress_label = ui.label('').classes('text-xs text-gray-500')
@@ -264,7 +260,7 @@ class DashboardPage:
             with ui.row().classes('items-center gap-2 mt-2'):
                 ui.label('TopK:').classes('text-xs text-gray-500')
                 self.topk_input = ui.number(value=10, min=1, max=1000, step=1).classes('w-16').props('dense outlined size=small')
-                self.refresh_button = ui.button(icon='refresh', on_click=self._on_refresh_topk).props('flat dense size=sm')
+                self.refresh_button = ui.button(icon='refresh', on_click=self._on_refresh_topk).props('flat dense size=sm').tooltip('刷新TopK结果')
                 self.refresh_button.disable()
             
             # Go to annotation button
@@ -273,7 +269,7 @@ class DashboardPage:
                     'Go to Annotation Tool',
                     on_click=self._goto_annotation,
                     icon='edit'
-                ).props('color=positive')
+                ).props('color=positive').tooltip('进入标注工具（分析模式或直接标注模式）')
                 self.goto_button.disable()
         
         # Bind checkbox events
@@ -782,6 +778,13 @@ class DashboardPage:
     
     def _generate_visualization(self, item: IssueItem) -> str:
         """Generate visualization image and return temp file path"""
+        # Import matplotlib here to avoid DLL loading issues on module import
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        import numpy as np
+        
         images_dir = Path(app_state.config.images_path)
         gt_dir = Path(app_state.config.gt_labels_path)
         pred_dir = Path(app_state.config.pred_labels_path)
@@ -791,9 +794,9 @@ class DashboardPage:
         gt_label_path = gt_dir / rel_path.with_suffix('.txt')
         pred_label_path = pred_dir / rel_path.with_suffix('.txt')
         
-        # Load image
-        img = Image.open(img_path)
-        img_w, img_h = img.size
+        # Load image using matplotlib's imread to avoid PIL dependency
+        img = plt.imread(img_path)
+        img_h, img_w, _ = img.shape
         
         # Load boxes
         gt_boxes = read_yolo_label(gt_label_path, img_w, img_h, has_confidence=False)

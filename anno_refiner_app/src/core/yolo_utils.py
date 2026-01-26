@@ -1,7 +1,6 @@
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
-from PIL import Image
 import logging
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
@@ -79,9 +78,41 @@ def write_yolo_label(label_path: Path, boxes: List[Dict], img_w: int, img_h: int
 
 
 def get_image_size(image_path: Path) -> Tuple[int, int]:
-    """Get image dimensions (width, height)"""
-    with Image.open(image_path) as img:
-        return img.size
+    """Get image dimensions (width, height) using Python built-in libraries"""
+    # Use struct to parse JPEG header - avoids PIL dependency and DLL issues
+    with open(image_path, 'rb') as f:
+        # JPEG SOI marker
+        f.read(2)
+        while True:
+            # Find next marker (starts with 0xFF)
+            while True:
+                marker = f.read(1)
+                if marker == b'':
+                    raise IOError("Invalid JPEG file")
+                if marker == b'\xff':
+                    break
+            # Read marker type
+            marker_type = f.read(1)
+            # Read segment length (2 bytes, big-endian)
+            length_bytes = f.read(2)
+            if len(length_bytes) != 2:
+                raise IOError("Invalid JPEG file")
+            length = (length_bytes[0] << 8) | length_bytes[1]
+            # Skip marker payload (subtract 2 for the length bytes themselves)
+            if marker_type in (b'\xc0', b'\xc1', b'\xc2', b'\xc3', b'\xc5', b'\xc6', b'\xc7', b'\xc9', b'\xca', b'\xcb', b'\xcd', b'\xce', b'\xcf'):
+                # SOF (Start of Frame) markers contain image dimensions
+                # Skip 5 bytes: 1 byte precision, 2 bytes height, 2 bytes width
+                f.read(1)  # precision
+                height_bytes = f.read(2)
+                width_bytes = f.read(2)
+                if len(height_bytes) != 2 or len(width_bytes) != 2:
+                    raise IOError("Invalid JPEG file")
+                height = (height_bytes[0] << 8) | height_bytes[1]
+                width = (width_bytes[0] << 8) | width_bytes[1]
+                return width, height
+            else:
+                # Skip other segments
+                f.read(length - 2)
 
 
 def collect_image_paths(images_dir: Path) -> List[Path]:

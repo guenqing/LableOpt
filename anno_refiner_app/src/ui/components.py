@@ -41,7 +41,7 @@ class InteractiveAnnotator:
     MAX_HISTORY = 50  # Maximum undo history
     
     # Available zoom levels (as multipliers)
-    ZOOM_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    ZOOM_LEVELS = [i * 0.2 for i in range(5, 101)]  # 1.0, 1.2, 1.4, ..., 20.0
     
     def __init__(self, on_change: Callable[[List[BBox]], None] = None,
                  on_zoom_change: Callable[[float], None] = None,
@@ -450,7 +450,9 @@ class InteractiveAnnotator:
             zoom: Target zoom level
             focus_point: (x, y) in image coordinates to keep centered. If None, auto-determine.
         """
-        new_zoom = max(1.0, min(zoom, 10.0))
+        # Clamp to range and round to nearest 0.2
+        new_zoom = max(1.0, min(zoom, 20.0))
+        new_zoom = round(new_zoom * 5) / 5  # Round to nearest 0.2
         
         if new_zoom == self.zoom:
             return
@@ -562,12 +564,12 @@ class InteractiveAnnotator:
             self.on_zoom_change(self.zoom)
     
     def zoom_in(self) -> None:
-        """Zoom in by 1 level"""
-        self.set_zoom(self.zoom + 1)
+        """Zoom in by 0.2 level"""
+        self.set_zoom(self.zoom + 0.2)
     
     def zoom_out(self) -> None:
-        """Zoom out by 1 level"""
-        self.set_zoom(self.zoom - 1)
+        """Zoom out by 0.2 level"""
+        self.set_zoom(self.zoom - 0.2)
     
     def auto_focus_boxes(self) -> None:
         """Automatically set zoom and pan to focus on all boxes (GT + Pred)
@@ -580,11 +582,34 @@ class InteractiveAnnotator:
         if not all_boxes:
             return
         
+        # Debug: Print actual box coordinates
+        print("=== Auto Focus Debug Info ===")
+        for i, box in enumerate(all_boxes):
+            print(f"Box {i} ({box.source}): x={box.x}, y={box.y}, w={box.w}, h={box.h}, x+w={box.x+box.w}, y+h={box.y+box.h}")
+        
         # Calculate union of all boxes
+        # Use all boxes' coordinates - no box should be left out
         min_x = min(box.x for box in all_boxes)
         min_y = min(box.y for box in all_boxes)
         max_x = max(box.x + box.w for box in all_boxes)
         max_y = max(box.y + box.h for box in all_boxes)
+        
+        # Debug: Print raw box boundaries
+        print(f"Raw box boundaries: min_x={min_x}, min_y={min_y}, max_x={max_x}, max_y={max_y}")
+        
+        # Calculate symmetric buffer that considers the entire viewport
+        # Use the same buffer for all sides
+        buffer = 40  # Balanced buffer to ensure all boxes and labels are visible
+        
+        # Apply symmetric buffer
+        min_x -= buffer
+        min_y -= buffer
+        max_x += buffer
+        max_y += buffer
+        
+        # Ensure boundaries don't go below 0
+        min_x = max(0, min_x)
+        min_y = max(0, min_y)
         
         # Box dimensions
         box_width = max_x - min_x
@@ -593,47 +618,53 @@ class InteractiveAnnotator:
         if box_width <= 0 or box_height <= 0:
             return
         
+        # Debug: Print buffered boundaries
+        print(f"Buffered boundaries: min_x={min_x}, min_y={min_y}, max_x={max_x}, max_y={max_y}")
+        print(f"Box area: width={box_width}, height={box_height}")
+        
         # Get scale at 1x zoom
         scale_1x = self._get_viewer_scale_1x()
         if scale_1x <= 0:
             return
         
-        # Calculate optimal zoom level
+        print(f"Image size: {self.image_width}x{self.image_height}, View size: {self.view_width}x{self.view_height}, Scale_1x: {scale_1x}")
+        
+        # Calculate optimal zoom level with appropriate margin
         # At zoom level Z, visible area in image coords: view_width/(Z*scale_1x) x view_height/(Z*scale_1x)
-        # We want: visible_width >= box_width and visible_height >= box_height
-        # So: Z <= view_width/(box_width*scale_1x) and Z <= view_height/(box_height*scale_1x)
-        zoom_x = self.view_width / (box_width * scale_1x)
-        zoom_y = self.view_height / (box_height * scale_1x)
+        # We want: visible_width >= box_width and visible_height >= box_height with sufficient margin
+        margin_factor = 0.85  # 15% margin to ensure all boxes and labels fit comfortably
+        
+        # Calculate required zoom for x and y directions
+        visible_width_needed = box_width / margin_factor
+        visible_height_needed = box_height / margin_factor
+        
+        zoom_x = self.view_width / (visible_width_needed * scale_1x)
+        zoom_y = self.view_height / (visible_height_needed * scale_1x)
+        
         optimal_zoom = min(zoom_x, zoom_y)
         
-        # Round down to nearest integer and clamp to available zoom levels
-        optimal_zoom = max(1, min(int(optimal_zoom), max(self.ZOOM_LEVELS)))
+        # Debug: Print zoom calculation
+        print(f"Visible area needed: {visible_width_needed}x{visible_height_needed}")
+        print(f"Calculated zoom: x={zoom_x}, y={zoom_y}, optimal={optimal_zoom}")
         
-        # Calculate center of boxes
-        center_x = (min_x + max_x) / 2
-        center_y = (min_y + max_y) / 2
+        # Round to nearest 0.2 level and clamp to available zoom levels
+        optimal_zoom = max(1.0, min(optimal_zoom, 20.0))
+        optimal_zoom = round(optimal_zoom * 5) / 5  # Round to nearest 0.2
         
-        # Set zoom
-        self.zoom = float(optimal_zoom)
+        print(f"Final zoom: {optimal_zoom}")
         
-        # Calculate pan to center the boxes
-        # At zoom Z, visible area in image coords: view_width/(Z*scale_1x) x view_height/(Z*scale_1x)
-        visible_w = self.view_width / (self.zoom * scale_1x)
-        visible_h = self.view_height / (self.zoom * scale_1x)
+        # Calculate center of boxes - use the original box center without buffer
+        # This ensures we're focusing on the actual content
+        original_center_x = (min(box.x for box in all_boxes) + max(box.x + box.w for box in all_boxes)) / 2
+        original_center_y = (min(box.y for box in all_boxes) + max(box.y + box.h for box in all_boxes)) / 2
         
-        # Set pan so that center point is at the center of viewport
-        self.pan_x = center_x - visible_w / 2
-        self.pan_y = center_y - visible_h / 2
+        print(f"Focus center: ({original_center_x}, {original_center_y})")
         
-        # Constrain pan to keep image visible
-        self._constrain_pan()
+        # Set zoom using the set_zoom method with the original center of boxes as focus point
+        self.set_zoom(float(optimal_zoom), focus_point=(original_center_x, original_center_y))
         
-        # Apply transform and update UI
-        self._apply_transform()
-        self._update_scrollbars()
-        
-        if self.on_zoom_change:
-            self.on_zoom_change(self.zoom)
+        # The set_zoom method handles pan calculation, constraint, transform application,
+        # scrollbar updates, and zoom change notifications
     
     def _get_viewer_scale_1x(self) -> float:
         """Get the scale factor at 1x zoom (when image fits in viewer with aspect ratio preserved)

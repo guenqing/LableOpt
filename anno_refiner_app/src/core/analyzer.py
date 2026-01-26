@@ -4,14 +4,7 @@ import numpy as np
 import logging
 import time
 
-from cleanlab.object_detection.rank import (
-    get_label_quality_scores,
-    compute_overlooked_box_scores,
-    compute_swap_box_scores,
-    compute_badloc_box_scores,
-    _get_valid_inputs_for_compute_scores
-)
-from cleanlab.internal.constants import ALPHA
+# cleanlab imports are moved inside analyze method to avoid DLL loading issues
 
 from ..models import IssueItem, IssueType
 from .yolo_utils import (
@@ -161,6 +154,16 @@ class CleanlabAnalyzer:
         Returns:
             IssueItem lists grouped by issue type
         """
+        # Import cleanlab here to avoid DLL loading issues on module import
+        from cleanlab.object_detection.rank import (
+            get_label_quality_scores,
+            compute_overlooked_box_scores,
+            compute_swap_box_scores,
+            compute_badloc_box_scores,
+            _get_valid_inputs_for_compute_scores
+        )
+        from cleanlab.internal.constants import ALPHA
+        
         # Pre-compute auxiliary inputs to avoid redundant computation
         # This reduces computation time by sharing similarity matrices and other
         # intermediate results across the three score computation functions
