@@ -466,6 +466,174 @@ def _collect_processed_label_keys(labels_dir: Path) -> set[Path]:
     return keys
 
 
+def _collect_processed_label_keys_txt_only(labels_dir: Path) -> set[Path]:
+    """Collect processed keys from .txt only (exclude *_tmp.txt)."""
+    keys: set[Path] = set()
+    if not labels_dir.exists():
+        return keys
+
+    for p in labels_dir.rglob('*.txt'):
+        if not p.is_file():
+            continue
+        if p.name.endswith('_tmp.txt'):
+            continue
+        rel = p.relative_to(labels_dir)
+        keys.add(rel.with_suffix(''))
+
+    return keys
+
+
+def parse_data_for_dashboard(
+    images_path: str,
+    gt_labels_path: str,
+    pred_labels_path: str,
+    output_path: str,
+    human_verified_path: str,
+) -> dict:
+    """
+    Parse dashboard data on demand.
+
+    Returns:
+        dict with keys:
+          - mode: "images_full" or "labels"
+          - images_exists, images_count
+          - gt_valid, gt_missing_img
+          - pred_valid, pred_missing_img
+          - output_valid, output_missing_img
+          - human_valid, human_missing_img
+          - pending (int or None)
+          - errors: list[str]
+    """
+    result = {
+        "mode": "",
+        "images_exists": False,
+        "images_count": None,
+        "gt_valid": 0,
+        "gt_missing_img": 0,
+        "pred_valid": 0,
+        "pred_missing_img": 0,
+        "output_valid": 0,
+        "output_missing_img": 0,
+        "human_valid": 0,
+        "human_missing_img": 0,
+        "pending": None,
+        "errors": [],
+    }
+
+    images_dir = Path(images_path) if images_path and str(images_path).strip() else None
+    gt_dir = Path(gt_labels_path) if gt_labels_path and str(gt_labels_path).strip() else None
+    pred_dir = Path(pred_labels_path) if pred_labels_path and str(pred_labels_path).strip() else None
+    output_dir = Path(output_path) if output_path and str(output_path).strip() else None
+    human_dir = Path(human_verified_path) if human_verified_path and str(human_verified_path).strip() else None
+
+    if images_dir is not None and images_dir.exists():
+        result["images_exists"] = True
+    elif images_dir is not None:
+        result["errors"].append(f"Images directory not found: {images_path}")
+
+    has_gt = gt_dir is not None
+    has_pred = pred_dir is not None
+    labels_mode = has_gt or has_pred
+
+    from .yolo_utils import collect_label_keys, find_image_rel_path_for_key
+
+    image_cache: dict[Path, Optional[Path]] = {}
+
+    def _find_image_for_key(key: Path) -> Optional[Path]:
+        if key in image_cache:
+            return image_cache[key]
+        if images_dir is None or not result["images_exists"]:
+            image_cache[key] = None
+            return None
+        rel = find_image_rel_path_for_key(images_dir, key)
+        image_cache[key] = rel
+        return rel
+
+    if not labels_mode:
+        result["mode"] = "images_full"
+        if result["images_exists"]:
+            result["images_count"] = _count_image_files(images_dir)
+            result["pending"] = int(result["images_count"])
+        return result
+
+    result["mode"] = "labels"
+
+    gt_keys: Optional[set[Path]] = None
+    pred_keys: Optional[set[Path]] = None
+
+    if gt_dir is not None:
+        if gt_dir.exists():
+            gt_keys = collect_label_keys(gt_dir, exclude_tmp=True)
+            for key in gt_keys:
+                if _find_image_for_key(key) is None:
+                    result["gt_missing_img"] += 1
+                else:
+                    result["gt_valid"] += 1
+        else:
+            result["errors"].append(f"GT labels directory not found: {gt_labels_path}")
+
+    if pred_dir is not None:
+        if pred_dir.exists():
+            pred_keys = collect_label_keys(pred_dir, exclude_tmp=False)
+            for key in pred_keys:
+                if _find_image_for_key(key) is None:
+                    result["pred_missing_img"] += 1
+                else:
+                    result["pred_valid"] += 1
+        else:
+            result["errors"].append(f"Pred labels directory not found: {pred_labels_path}")
+
+    output_keys: set[Path] = set()
+    if output_dir is not None:
+        if output_dir.exists():
+            output_keys = _collect_processed_label_keys(output_dir)
+            for key in output_keys:
+                if _find_image_for_key(key) is None:
+                    result["output_missing_img"] += 1
+                else:
+                    result["output_valid"] += 1
+        else:
+            result["errors"].append(f"Output directory not found: {output_path}")
+
+    human_keys: set[Path] = set()
+    if human_dir is not None:
+        if human_dir.exists():
+            human_keys = _collect_processed_label_keys_txt_only(human_dir)
+            for key in human_keys:
+                if _find_image_for_key(key) is None:
+                    result["human_missing_img"] += 1
+                else:
+                    result["human_valid"] += 1
+        else:
+            result["errors"].append(f"Human verified directory not found: {human_verified_path}")
+
+    if not result["images_exists"]:
+        return result
+
+    processed_keys = output_keys | human_keys
+
+    candidate_keys: Optional[set[Path]] = None
+    if gt_keys is not None:
+        candidate_keys = set(gt_keys) if candidate_keys is None else (candidate_keys & gt_keys)
+    if pred_keys is not None:
+        candidate_keys = set(pred_keys) if candidate_keys is None else (candidate_keys & pred_keys)
+
+    if not candidate_keys:
+        result["pending"] = 0
+        return result
+
+    pending = 0
+    for key in candidate_keys:
+        if _find_image_for_key(key) is None:
+            continue
+        if key in processed_keys:
+            continue
+        pending += 1
+
+    result["pending"] = pending
+    return result
+
+
 def estimate_dashboard_counts_and_pending(
     images_path: str = "",
     gt_labels_path: str = "",

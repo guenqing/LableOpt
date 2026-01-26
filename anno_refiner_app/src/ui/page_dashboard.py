@@ -16,11 +16,9 @@ from PIL import Image
 from ..state import app_state
 from ..models import IssueType, IssueItem, ClassMapping
 from ..core.file_manager import (
-    validate_paths,
     backup_folder,
     validate_output_path,
-    estimate_dashboard_counts_and_pending,
-    count_images_in_dir,
+    parse_data_for_dashboard,
 )
 from ..core.path_utils import resolve_with_base_dir
 from ..core.analyzer import CleanlabAnalyzer
@@ -33,14 +31,15 @@ class DashboardPage:
     def __init__(self):
         self.progress_bar = None
         self.progress_label = None
+        self.parse_button = None
         self.run_button = None
         self.goto_button = None
         self._analysis_progress_timer = None
 
-        # Path parsing progress (for validate_paths)
+        # Path parsing progress
         self.parse_progress_bar = None
         self.parse_progress_label = None
-        self._validate_task = None
+        self._parse_task = None
         
         # Path input fields
         self.images_input = None
@@ -68,10 +67,6 @@ class DashboardPage:
         self.output_count_label = None
         self.human_count_label = None
 
-        # Simple cache to avoid rescanning huge Images Path
-        self._cached_images_path = None
-        self._cached_images_count = None
-        
         # TopK input
         self.topk_input = None
         self.refresh_button = None
@@ -195,6 +190,13 @@ class DashboardPage:
                 
                 ui.separator().classes('my-2')
                 
+                # Parse data button
+                self.parse_button = ui.button(
+                    'Parse Data',
+                    on_click=self._on_parse_data,
+                    icon='auto_fix_high'
+                ).classes('w-full').props('color=negative')
+
                 # Run button
                 self.run_button = ui.button(
                     'RUN ANALYSIS',
@@ -296,13 +298,13 @@ class DashboardPage:
     def _on_path_change(self, e=None):
         """Handle path input change"""
         self._sync_paths_to_config()
-        self._schedule_validate_paths()
+        self._clear_parse_results()
     
     def _on_output_path_change(self, e=None):
         """Handle output path input change"""
         self._sync_paths_to_config()
         self._validate_output_path()
-        self._schedule_validate_paths()
+        self._clear_parse_results()
 
     def _to_abs(self, user_value: str) -> str:
         return resolve_with_base_dir(app_state.config.base_dir, user_value or '')
@@ -315,168 +317,54 @@ class DashboardPage:
         app_state.config.output_path = self._to_abs(self.output_input.value)
         app_state.config.human_verified_path = self._to_abs(self.human_verified_input.value)
 
-    def _schedule_validate_paths(self) -> None:
-        """Debounced, non-blocking path validation with progress indicator."""
-        if self._validate_task and not self._validate_task.done():
-            self._validate_task.cancel()
-        self._validate_task = asyncio.create_task(self._validate_paths_async())
-    
-    def _validate_paths(self):
-        """Validate all paths and update status labels"""
-        images_path = app_state.config.images_path or ''
-        gt_path = app_state.config.gt_labels_path or ''
-        pred_path = app_state.config.pred_labels_path or ''
-        
-        self.images_status.text = ''
-        self.gt_status.text = ''
-        self.pred_status.text = ''
-        
-        if not images_path or not gt_path or not pred_path:
-            return
-        
-        result = validate_paths(images_path, gt_path, pred_path)
-        app_state.path_validation = result
-        
-        if result['valid']:
-            self.images_status.text = f'{result["images_count"]} imgs'
-            self.images_status.classes(remove='text-red-500', add='text-green-600')
-            self.gt_status.text = f'{result["gt_count"]} files'
-            self.gt_status.classes(remove='text-red-500', add='text-green-600')
-            self.pred_status.text = f'{result["pred_count"]} files'
-            self.pred_status.classes(remove='text-red-500', add='text-green-600')
-        else:
-            for error in result['errors']:
-                if 'Images' in error:
-                    self.images_status.text = 'Not found'
-                    self.images_status.classes(remove='text-green-600', add='text-red-500')
-                elif 'GT' in error:
-                    self.gt_status.text = 'Not found'
-                    self.gt_status.classes(remove='text-green-600', add='text-red-500')
-                elif 'Pred' in error:
-                    self.pred_status.text = 'Not found'
-                    self.pred_status.classes(remove='text-green-600', add='text-red-500')
+    def _clear_parse_results(self) -> None:
+        """Clear parse result displays after path changes."""
+        if self.images_status:
+            self.images_status.text = ''
+        if self.gt_status:
+            self.gt_status.text = ''
+        if self.pred_status:
+            self.pred_status.text = ''
+        if self.human_status:
+            self.human_status.text = ''
+        if self.images_count_label:
+            self.images_count_label.text = ''
+        if self.gt_count_label:
+            self.gt_count_label.text = ''
+        if self.pred_count_label:
+            self.pred_count_label.text = ''
+        if self.output_count_label:
+            self.output_count_label.text = ''
+        if self.human_count_label:
+            self.human_count_label.text = ''
+        if self.pending_count:
+            self.pending_count.text = '--'
+        if self.pending_detail:
+            self.pending_detail.text = ''
+        if self.parse_progress_bar:
+            self.parse_progress_bar.visible = False
+        if self.parse_progress_label:
+            self.parse_progress_label.text = ''
 
-    async def _validate_paths_async(self):
-        """Async wrapper around validate_paths with an indeterminate progress bar."""
-        # debounce typing
-        await asyncio.sleep(0.2)
+    def _on_parse_data(self) -> None:
+        if self._parse_task and not self._parse_task.done():
+            self._parse_task.cancel()
+        self._parse_task = asyncio.create_task(self._parse_data_async())
+
+    async def _parse_data_async(self) -> None:
+        """Parse dashboard data on demand and update status labels."""
 
         images_path = (app_state.config.images_path or '').strip()
         gt_path = (app_state.config.gt_labels_path or '').strip()
         pred_path = (app_state.config.pred_labels_path or '').strip()
         output_path = (app_state.config.output_path or '').strip()
         human_path = (app_state.config.human_verified_path or '').strip()
-
-        # Track Images Path cache invalidation
-        if not images_path:
-            self._cached_images_path = None
-            self._cached_images_count = None
-        elif self._cached_images_path != images_path:
-            self._cached_images_path = images_path
-            self._cached_images_count = None
-
-        # Clear count labels on empty inputs immediately
-        if self.images_count_label and not images_path:
-            self.images_count_label.text = ''
-        if self.gt_count_label and not gt_path:
-            self.gt_count_label.text = ''
-        if self.pred_count_label and not pred_path:
-            self.pred_count_label.text = ''
-        if self.output_count_label and not output_path:
-            self.output_count_label.text = ''
-        if self.human_count_label and not human_path:
-            self.human_count_label.text = ''
-
-        # Quick per-path existence feedback (immediate, before heavy counting)
-        try:
-            if self.images_status:
-                if not images_path:
-                    self.images_status.text = ''
-                elif Path(images_path).exists():
-                    self.images_status.text = 'OK'
-                    self.images_status.classes(remove='text-red-500', add='text-green-600')
-                    if self.images_count_label:
-                        if self._cached_images_count is not None:
-                            self.images_count_label.text = f'{int(self._cached_images_count)} imgs'
-                        else:
-                            self.images_count_label.text = 'Counting...'
-                else:
-                    self.images_status.text = 'Not found'
-                    self.images_status.classes(remove='text-green-600', add='text-red-500')
-                    if self.images_count_label:
-                        self.images_count_label.text = ''
-
-            if self.gt_status:
-                if not gt_path:
-                    self.gt_status.text = ''
-                elif Path(gt_path).exists():
-                    self.gt_status.text = 'OK'
-                    self.gt_status.classes(remove='text-red-500', add='text-green-600')
-                    if self.gt_count_label:
-                        self.gt_count_label.text = 'Counting...'
-                else:
-                    self.gt_status.text = 'Not found'
-                    self.gt_status.classes(remove='text-green-600', add='text-red-500')
-                    if self.gt_count_label:
-                        self.gt_count_label.text = ''
-
-            if self.pred_status:
-                if not pred_path:
-                    self.pred_status.text = ''
-                elif Path(pred_path).exists():
-                    self.pred_status.text = 'OK'
-                    self.pred_status.classes(remove='text-red-500', add='text-green-600')
-                    if self.pred_count_label:
-                        self.pred_count_label.text = 'Counting...'
-                else:
-                    self.pred_status.text = 'Not found'
-                    self.pred_status.classes(remove='text-green-600', add='text-red-500')
-                    if self.pred_count_label:
-                        self.pred_count_label.text = ''
-
-            if self.human_status:
-                if not human_path:
-                    self.human_status.text = ''
-                elif Path(human_path).exists():
-                    self.human_status.text = 'OK'
-                    self.human_status.classes(remove='text-red-500', add='text-green-600')
-                    if self.human_count_label:
-                        self.human_count_label.text = 'Counting...'
-                else:
-                    self.human_status.text = 'Not found'
-                    self.human_status.classes(remove='text-green-600', add='text-red-500')
-                    if self.human_count_label:
-                        self.human_count_label.text = ''
-
-            if self.output_count_label:
-                if output_path:
-                    self.output_count_label.text = 'Counting...'
-        except RuntimeError:
-            # client disconnected
-            return
-
-        # If nothing is provided, clear pending and return quickly.
         if not any([images_path, gt_path, pred_path, output_path, human_path]):
-            if self.images_status:
-                self.images_status.text = ''
-            if self.gt_status:
-                self.gt_status.text = ''
-            if self.pred_status:
-                self.pred_status.text = ''
-            if self.human_status:
-                self.human_status.text = ''
-            if self.pending_count:
-                self.pending_count.text = '--'
-            if self.pending_detail:
-                self.pending_detail.text = ''
-            if self.parse_progress_bar:
-                self.parse_progress_bar.visible = False
-            if self.parse_progress_label:
-                self.parse_progress_label.text = ''
+            self._clear_parse_results()
             return
 
         if self.parse_progress_label:
-            self.parse_progress_label.text = 'Parsing paths...'
+            self.parse_progress_label.text = 'Parsing data...'
         if self.parse_progress_bar:
             self.parse_progress_bar.visible = True
 
@@ -485,18 +373,15 @@ class DashboardPage:
             loop = asyncio.get_event_loop()
             stats = await loop.run_in_executor(
                 None,
-                lambda: estimate_dashboard_counts_and_pending(
+                lambda: parse_data_for_dashboard(
                     images_path=images_path,
                     gt_labels_path=gt_path,
                     pred_labels_path=pred_path,
                     output_path=output_path,
                     human_verified_path=human_path,
-                    known_images_count=self._cached_images_count,
-                    include_images_count=False,
                 ),
             )
 
-            # Status + counts for Images/GT/Pred/Human (Output status is handled separately)
             if self.images_status:
                 if not images_path:
                     self.images_status.text = ''
@@ -507,106 +392,90 @@ class DashboardPage:
                     self.images_status.text = 'Not found'
                     self.images_status.classes(remove='text-green-600', add='text-red-500')
             if self.images_count_label:
-                if not stats.get('images_exists'):
-                    self.images_count_label.text = ''
-                elif stats.get('images_count') is not None:
+                if stats.get('images_count') is not None:
                     self.images_count_label.text = f'{int(stats["images_count"])} imgs'
-
-            # Update cache after a successful count
-            if images_path and stats.get('images_exists') and stats.get('images_count') is not None:
-                self._cached_images_path = images_path
-                self._cached_images_count = int(stats['images_count'])
+                else:
+                    self.images_count_label.text = ''
 
             if self.gt_status:
                 if not gt_path:
                     self.gt_status.text = ''
-                elif stats.get('gt_exists'):
+                elif Path(gt_path).exists():
                     self.gt_status.text = 'OK'
                     self.gt_status.classes(remove='text-red-500', add='text-green-600')
                 else:
                     self.gt_status.text = 'Not found'
                     self.gt_status.classes(remove='text-green-600', add='text-red-500')
             if self.gt_count_label:
-                if stats.get('gt_exists') and stats.get('gt_count') is not None:
-                    self.gt_count_label.text = f'{int(stats["gt_count"])} files'
+                if gt_path:
+                    self.gt_count_label.text = (
+                        f'valid: {int(stats.get("gt_valid") or 0)} '
+                        f'missing_img: {int(stats.get("gt_missing_img") or 0)}'
+                    )
                 else:
                     self.gt_count_label.text = ''
 
             if self.pred_status:
                 if not pred_path:
                     self.pred_status.text = ''
-                elif stats.get('pred_exists'):
+                elif Path(pred_path).exists():
                     self.pred_status.text = 'OK'
                     self.pred_status.classes(remove='text-red-500', add='text-green-600')
                 else:
                     self.pred_status.text = 'Not found'
                     self.pred_status.classes(remove='text-green-600', add='text-red-500')
             if self.pred_count_label:
-                if stats.get('pred_exists') and stats.get('pred_count') is not None:
-                    self.pred_count_label.text = f'{int(stats["pred_count"])} files'
+                if pred_path:
+                    self.pred_count_label.text = (
+                        f'valid: {int(stats.get("pred_valid") or 0)} '
+                        f'missing_img: {int(stats.get("pred_missing_img") or 0)}'
+                    )
                 else:
                     self.pred_count_label.text = ''
+
+            if self.output_count_label:
+                if output_path:
+                    self.output_count_label.text = (
+                        f'valid: {int(stats.get("output_valid") or 0)} '
+                        f'missing_img: {int(stats.get("output_missing_img") or 0)}'
+                    )
+                else:
+                    self.output_count_label.text = ''
 
             if self.human_status:
                 if not human_path:
                     self.human_status.text = ''
-                elif stats.get('human_exists'):
+                elif Path(human_path).exists():
                     self.human_status.text = 'OK'
                     self.human_status.classes(remove='text-red-500', add='text-green-600')
                 else:
                     self.human_status.text = 'Not found'
                     self.human_status.classes(remove='text-green-600', add='text-red-500')
             if self.human_count_label:
-                if stats.get('human_set'):
-                    self.human_count_label.text = f'processed: {int(stats.get("human_processed") or 0)}'
+                if human_path:
+                    self.human_count_label.text = (
+                        f'valid: {int(stats.get("human_valid") or 0)} '
+                        f'missing_img: {int(stats.get("human_missing_img") or 0)}'
+                    )
                 else:
                     self.human_count_label.text = ''
 
-            if self.output_count_label:
-                if stats.get('output_set'):
-                    self.output_count_label.text = f'processed: {int(stats.get("output_processed") or 0)}'
-                else:
-                    self.output_count_label.text = ''
-
-            # Pending (generalized; can work without Pred)
             pending = stats.get('pending')
             if self.pending_count:
                 self.pending_count.text = '--' if pending is None else str(int(pending))
             if self.pending_detail:
-                mode = stats.get('pending_mode') or ''
-                if pending is None:
-                    if not images_path:
-                        self.pending_detail.text = 'Fill Images to compute'
-                    elif not output_path:
-                        self.pending_detail.text = 'Fill Output to compute'
-                    else:
-                        self.pending_detail.text = 'Pending not available'
+                if pending is None and not images_path:
+                    self.pending_detail.text = 'Fill Images to compute'
                 else:
-                    skipped = int(stats.get('pending_skipped') or 0)
-                    missing_img = int(stats.get('pending_missing_img') or 0)
-                    self.pending_detail.text = f'mode={mode} skipped={skipped} missing_img={missing_img}'
-
-            # Count Images in background (can be expensive on huge dirs); do it after fast stats.
-            if images_path and stats.get('images_exists') and self._cached_images_count is None:
-                try:
-                    img_count = await loop.run_in_executor(None, lambda: count_images_in_dir(images_path))
-                    self._cached_images_path = images_path
-                    self._cached_images_count = int(img_count)
-                    if self.images_count_label:
-                        self.images_count_label.text = f'{int(img_count)} imgs'
-                except asyncio.CancelledError:
-                    return
-                except Exception:
-                    # keep existing display
-                    pass
+                    self.pending_detail.text = ''
 
             elapsed = time.time() - start_time
             import logging
             logging.getLogger(__name__).info(
                 f'Path parsing done in {elapsed:.3f}s: '
-                f'imgs={stats.get("images_count")} gt={stats.get("gt_count")} pred={stats.get("pred_count")} '
-                f'out={stats.get("output_processed")} human={stats.get("human_processed")} '
-                f'pending={stats.get("pending")} mode={stats.get("pending_mode")}'
+                f'imgs={stats.get("images_count")} gt_valid={stats.get("gt_valid")} pred_valid={stats.get("pred_valid")} '
+                f'out_valid={stats.get("output_valid")} human_valid={stats.get("human_valid")} '
+                f'pending={stats.get("pending")} mode={stats.get("mode")}'
             )
         except asyncio.CancelledError:
             return
@@ -619,28 +488,6 @@ class DashboardPage:
             if self.parse_progress_label:
                 self.parse_progress_label.text = ''
 
-    def _apply_path_validation_result(self, result: dict) -> None:
-        """Apply validate_paths() result to UI status labels."""
-        if result.get('valid'):
-            self.images_status.text = f'{result["images_count"]} imgs'
-            self.images_status.classes(remove='text-red-500', add='text-green-600')
-            self.gt_status.text = f'{result["gt_count"]} files'
-            self.gt_status.classes(remove='text-red-500', add='text-green-600')
-            self.pred_status.text = f'{result["pred_count"]} files'
-            self.pred_status.classes(remove='text-red-500', add='text-green-600')
-            return
-
-        for error in result.get('errors', []):
-            if 'Images' in error:
-                self.images_status.text = 'Not found'
-                self.images_status.classes(remove='text-green-600', add='text-red-500')
-            elif 'GT' in error:
-                self.gt_status.text = 'Not found'
-                self.gt_status.classes(remove='text-green-600', add='text-red-500')
-            elif 'Pred' in error:
-                self.pred_status.text = 'Not found'
-                self.pred_status.classes(remove='text-green-600', add='text-red-500')
-    
     def _validate_output_path(self):
         """Validate output path and check for conflicts"""
         output_path = app_state.config.output_path or ''

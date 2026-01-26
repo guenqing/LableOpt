@@ -1,8 +1,8 @@
 # Refiner 系统技术文档
 
-> 最后更新: 2026-01-22
+> 最后更新: 2026-01-23
 > 
-> 最新更新: 新增跳过 Cleanlab 的直接标注模式；路径必填规则调整（Images+Output）；Dashboard 实时展示各路径样本量与 Pending Samples；修复 Annotator 返回 Dashboard 需二次点击；GT/Pred 加载可选化；Annotator 快捷键 Tab 改为 ·；新增 Save Unmodified。
+> 最新更新: Dashboard 改为手动 `Parse Data` 解析；Pending 口径改为集合论缺省视为全集并输出 missing_img；路径必填规则调整（Images+Output）；修复 Annotator 返回 Dashboard 需二次点击；GT/Pred 加载可选化；Annotator 快捷键 Tab 改为 ·；新增 Save Unmodified。
 
 ## 系统功能与逻辑概述
 
@@ -232,14 +232,12 @@ def prepare_cleanlab_labels(...):
 - `save_tmp_annotation()`: 保存临时标注到Output Path
 - `confirm_changes()`: 确认或丢弃更改（操作Output Path）
 - `get_tmp_files()`: 获取Output Path中的临时文件列表
-- `validate_paths()`: 验证输入路径并统计文件数（包含耗时日志）
 - `validate_output_path()`: 验证Output Path并检查与GT/Pred路径的冲突
 - `ensure_output_structure()`: 批量创建Output子目录结构（大数据集下不建议在RUN ANALYSIS前全量扫描创建，现已改为按需创建）
 - `should_skip_sample()`: 检查样本是否已在Output Path或Human Verified Path中存在
 - `collect_annotation_image_paths()`: 直接标注模式的样本队列构建（`Images ∩ (GT if set) ∩ (Pred if set)`，再排除已处理）
 - `estimate_pending_analysis_samples()`: 估算分析待处理样本（`Images ∩ GT ∩ Pred - processed`）
-- `estimate_dashboard_counts_and_pending()`: Dashboard 侧各路径样本量/processed 统计与 pending 估算（支持不填 Pred）
-- `count_images_in_dir()`: 统计 Images Path 下图片数量（用于后台计数与缓存）
+- `parse_data_for_dashboard()`: Dashboard 侧手动解析入口，按 label key 统计 valid/missing_img，并按新口径计算 pending
 
 **样本过滤逻辑**:
 - RUN ANALYSIS样本由 `analyzer.prepare_data()` 先按 `GT Labels ∩ Pred Labels ∩ Images` 收集
@@ -388,14 +386,15 @@ Dashboard配置面板包含以下路径输入：
 - **Pred Labels Path** (可选): 预测标签目录
 - **Human Verified Annotation Path** (可选): 人工验证路径，可为空
 - **Classes File** (可选): 类别映射文件
+- **Parse Data**: 手动触发路径解析与统计（位于 `RUN ANALYSIS` 上方）
 - **Pending Samples**: 待处理样本数（醒目显示）
-  - 定义：`Images ∩ (GT if set) ∩ (Pred if set) - processed(Output/Human Verified)`
-  - 输出/人工验证路径会显示 processed 计数（`.txt` / `*_tmp.txt` 归一后去重）
+  - 定义：`Images ∩ (GT if set) ∩ (Pred if set) - Output - Human Verified`
+  - Output 以 `{stem}.txt` 与 `{stem}_tmp.txt` 归一，Human Verified 仅计 `{stem}.txt`
 
-**路径验证**:
-- 路径输入变化时异步解析并刷新：每个输入框右侧显示 `OK/Not found`，输入框下方显示对应数量（imgs/files/processed）
-- Images Path 计数可能较慢（大目录），实现里对图片数量做缓存，避免重复全量扫描
-- Pending Samples 会在路径变更时实时更新（即使 Pred 未填写，也会基于已填写维度计算）
+**路径解析**:
+- 路径输入变化时仅同步配置并清空上次统计；不再自动解析
+- 点击 `Parse Data` 后才解析：每个输入框右侧显示 `OK/Not found`，输入框下方显示 `valid/missing_img`
+- Images-only 模式全量扫描 Images，其它模式按 label key 探测图片存在并缓存结果
 - RUN ANALYSIS点击时只做轻量 `Path.exists()` 校验，并强制要求 Images+GT+Pred 同时存在，否则弹窗提示并拒绝执行
 
 #### 运行分析与进度（断线重连安全）
