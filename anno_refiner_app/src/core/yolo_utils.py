@@ -13,23 +13,103 @@ PARALLEL_THRESHOLD = 10000  # Use parallel for > 50k samples
 
 def yolo_to_pixel(cx: float, cy: float, w: float, h: float,
                   img_w: int, img_h: int) -> Tuple[float, float, float, float]:
-    """YOLO normalized coords -> pixel coords (x1, y1, x2, y2)"""
+    """YOLO normalized coords -> pixel coords (x1, y1, x2, y2)
+    
+    Args:
+        cx: YOLO center x (normalized 0-1)
+        cy: YOLO center y (normalized 0-1)
+        w: YOLO width (normalized 0-1)
+        h: YOLO height (normalized 0-1)
+        img_w: Image width in pixels
+        img_h: Image height in pixels
+        
+    Returns:
+        x1, y1, x2, y2: Pixel coordinates (left, top, right, bottom)
+    """
+    # Ensure image dimensions are valid
+    if img_w <= 0 or img_h <= 0:
+        logger.warning(f"Invalid image dimensions: {img_w}x{img_h}")
+        return 0.0, 0.0, 0.0, 0.0
+    
+    # Validate and clamp normalized coordinates to avoid extreme values
+    cx = max(0.0, min(cx, 1.0))
+    cy = max(0.0, min(cy, 1.0))
+    w = max(0.001, min(w, 1.0))  # Ensure minimum width to avoid zero-size boxes
+    h = max(0.001, min(h, 1.0))  # Ensure minimum height to avoid zero-size boxes
+    
+    # Convert normalized coordinates to pixel coordinates with precise calculation
     box_w = w * img_w
     box_h = h * img_h
-    x1 = (cx * img_w) - (box_w / 2)
-    y1 = (cy * img_h) - (box_h / 2)
-    x2 = x1 + box_w
-    y2 = y1 + box_h
+    center_x = cx * img_w
+    center_y = cy * img_h
+    
+    x1 = center_x - (box_w / 2)
+    y1 = center_y - (box_h / 2)
+    x2 = center_x + (box_w / 2)
+    y2 = center_y + (box_h / 2)
+    
+    # Ensure coordinates are strictly within image boundaries (using float precision)
+    x1 = max(0.0, min(x1, img_w - 1e-6))
+    y1 = max(0.0, min(y1, img_h - 1e-6))
+    x2 = max(0.0, min(x2, img_w))
+    y2 = max(0.0, min(y2, img_h))
+    
+    # Final validation to ensure valid box dimensions
+    if x1 >= x2 - 1.0 or y1 >= y2 - 1.0:
+        logger.warning(f"Pixel box dimensions invalid after clamping: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+        return 0.0, 0.0, 0.0, 0.0
+    
     return x1, y1, x2, y2
 
 
 def pixel_to_yolo(x1: float, y1: float, x2: float, y2: float,
                   img_w: int, img_h: int) -> Tuple[float, float, float, float]:
-    """Pixel coords (x1, y1, x2, y2) -> YOLO normalized coords"""
-    cx = ((x1 + x2) / 2) / img_w
-    cy = ((y1 + y2) / 2) / img_h
-    w = (x2 - x1) / img_w
-    h = (y2 - y1) / img_h
+    """Pixel coords (x1, y1, x2, y2) -> YOLO normalized coords
+    
+    Args:
+        x1: Pixel x1 (left)
+        y1: Pixel y1 (top)
+        x2: Pixel x2 (right)
+        y2: Pixel y2 (bottom)
+        img_w: Image width in pixels
+        img_h: Image height in pixels
+        
+    Returns:
+        cx, cy, w, h: YOLO normalized coordinates
+    """
+    # Ensure image dimensions are valid
+    if img_w <= 0 or img_h <= 0:
+        logger.warning(f"Invalid image dimensions: {img_w}x{img_h}")
+        return 0.0, 0.0, 0.0, 0.0
+    
+    # Ensure coordinates are within image boundaries
+    x1 = max(0.0, min(x1, img_w))
+    y1 = max(0.0, min(y1, img_h))
+    x2 = max(0.0, min(x2, img_w))
+    y2 = max(0.0, min(y2, img_h))
+    
+    # Ensure valid box dimensions (avoid zero or negative size)
+    if x1 >= x2 - 1.0 or y1 >= y2 - 1.0:
+        logger.warning(f"Invalid box dimensions: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+        return 0.0, 0.0, 0.0, 0.0
+    
+    # Calculate YOLO coordinates with precision handling
+    cx = round(((x1 + x2) / 2) / img_w, 6)
+    cy = round(((y1 + y2) / 2) / img_h, 6)
+    w = round((x2 - x1) / img_w, 6)
+    h = round((y2 - y1) / img_h, 6)
+    
+    # Ensure coordinates are within normalized range [0, 1]
+    cx = max(0.0, min(cx, 1.0))
+    cy = max(0.0, min(cy, 1.0))
+    w = max(0.0, min(w, 1.0))
+    h = max(0.0, min(h, 1.0))
+    
+    # Final validation to ensure no invalid values
+    if cx < 0.0 or cx > 1.0 or cy < 0.0 or cy > 1.0 or w <= 0.0 or w > 1.0 or h <= 0.0 or h > 1.0:
+        logger.warning(f"Normalized coordinates out of bounds: cx={cx}, cy={cy}, w={w}, h={h}")
+        return 0.0, 0.0, 0.0, 0.0
+    
     return cx, cy, w, h
 
 
@@ -55,16 +135,32 @@ def read_yolo_label(label_path: Path, img_w: int, img_h: int,
         for line in f:
             parts = line.strip().split()
             if len(parts) >= 5:
-                class_id = int(parts[0])
-                cx, cy, w, h = map(float, parts[1:5])
-                x1, y1, x2, y2 = yolo_to_pixel(cx, cy, w, h, img_w, img_h)
-                box_dict = {
-                    'class_id': class_id,
-                    'bbox': [x1, y1, x2, y2]
-                }
-                if has_confidence and len(parts) >= 6:
-                    box_dict['confidence'] = float(parts[5])
-                boxes.append(box_dict)
+                try:
+                    class_id = int(parts[0])
+                    cx, cy, w, h = map(float, parts[1:5])
+                    
+                    # Validate YOLO coordinates (should be in [0, 1] range)
+                    if not (0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0 and 
+                            0.0 <= w <= 1.0 and 0.0 <= h <= 1.0):
+                        logger.warning(f"Invalid YOLO coordinates in {label_path}: {cx}, {cy}, {w}, {h}")
+                        continue
+                    
+                    x1, y1, x2, y2 = yolo_to_pixel(cx, cy, w, h, img_w, img_h)
+                    box_dict = {
+                        'class_id': class_id,
+                        'bbox': [x1, y1, x2, y2]
+                    }
+                    if has_confidence and len(parts) >= 6:
+                        confidence = float(parts[5])
+                        # Validate confidence score
+                        if 0.0 <= confidence <= 1.0:
+                            box_dict['confidence'] = confidence
+                        else:
+                            logger.warning(f"Invalid confidence score in {label_path}: {confidence}")
+                            box_dict['confidence'] = 1.0
+                    boxes.append(box_dict)
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Error parsing line in {label_path}: {line.strip()} - {e}")
     return boxes
 
 
@@ -78,41 +174,83 @@ def write_yolo_label(label_path: Path, boxes: List[Dict], img_w: int, img_h: int
 
 
 def get_image_size(image_path: Path) -> Tuple[int, int]:
-    """Get image dimensions (width, height) using Python built-in libraries"""
-    # Use struct to parse JPEG header - avoids PIL dependency and DLL issues
+    """Get image dimensions (width, height) using Python built-in libraries
+    
+    Supports JPEG, PNG and BMP formats without external dependencies.
+    
+    Args:
+        image_path: Path to the image file
+        
+    Returns:
+        Tuple of (width, height) in pixels
+        
+    Raises:
+        IOError: If the file is not a supported image format or is corrupted
+    """
     with open(image_path, 'rb') as f:
-        # JPEG SOI marker
-        f.read(2)
-        while True:
-            # Find next marker (starts with 0xFF)
+        # Read file signature
+        header = f.read(32)  # Read enough bytes to identify format and get dimensions
+        
+        # JPEG format
+        if header.startswith(b'\xff\xd8\xff'):
+            f.seek(2)  # Skip SOI marker
             while True:
-                marker = f.read(1)
-                if marker == b'':
+                # Find next marker
+                while True:
+                    marker = f.read(1)
+                    if marker == b'':
+                        raise IOError("Invalid JPEG file")
+                    if marker == b'\xff':
+                        break
+                
+                # Read marker type
+                marker_type = f.read(1)
+                
+                # Read segment length (2 bytes, big-endian)
+                length_bytes = f.read(2)
+                if len(length_bytes) != 2:
                     raise IOError("Invalid JPEG file")
-                if marker == b'\xff':
-                    break
-            # Read marker type
-            marker_type = f.read(1)
-            # Read segment length (2 bytes, big-endian)
-            length_bytes = f.read(2)
-            if len(length_bytes) != 2:
-                raise IOError("Invalid JPEG file")
-            length = (length_bytes[0] << 8) | length_bytes[1]
-            # Skip marker payload (subtract 2 for the length bytes themselves)
-            if marker_type in (b'\xc0', b'\xc1', b'\xc2', b'\xc3', b'\xc5', b'\xc6', b'\xc7', b'\xc9', b'\xca', b'\xcb', b'\xcd', b'\xce', b'\xcf'):
-                # SOF (Start of Frame) markers contain image dimensions
-                # Skip 5 bytes: 1 byte precision, 2 bytes height, 2 bytes width
-                f.read(1)  # precision
-                height_bytes = f.read(2)
-                width_bytes = f.read(2)
-                if len(height_bytes) != 2 or len(width_bytes) != 2:
-                    raise IOError("Invalid JPEG file")
-                height = (height_bytes[0] << 8) | height_bytes[1]
-                width = (width_bytes[0] << 8) | width_bytes[1]
-                return width, height
-            else:
-                # Skip other segments
-                f.read(length - 2)
+                length = (length_bytes[0] << 8) | length_bytes[1]
+                
+                # Check if this is a SOF (Start of Frame) marker
+                if marker_type in (b'\xc0', b'\xc1', b'\xc2', b'\xc3', b'\xc5', b'\xc6', b'\xc7', 
+                                   b'\xc9', b'\xca', b'\xcb', b'\xcd', b'\xce', b'\xcf'):
+                    # SOF markers contain image dimensions
+                    f.read(1)  # Skip precision byte
+                    
+                    # Read height and width (both 2 bytes, big-endian)
+                    height_bytes = f.read(2)
+                    width_bytes = f.read(2)
+                    if len(height_bytes) != 2 or len(width_bytes) != 2:
+                        raise IOError("Invalid JPEG file")
+                    
+                    height = (height_bytes[0] << 8) | height_bytes[1]
+                    width = (width_bytes[0] << 8) | width_bytes[1]
+                    return width, height
+                else:
+                    # Skip other segments
+                    f.read(length - 2)
+        
+        # PNG format
+        elif header.startswith(b'\x89PNG\r\n\x1a\n'):
+            # Find IHDR chunk (should be the first chunk)
+            if not header[12:16] == b'IHDR':
+                raise IOError("Invalid PNG file: missing IHDR chunk")
+            
+            # Read width and height from IHDR chunk
+            width = (header[16] << 24) | (header[17] << 16) | (header[18] << 8) | header[19]
+            height = (header[20] << 24) | (header[21] << 16) | (header[22] << 8) | header[23]
+            return width, height
+        
+        # BMP format
+        elif header.startswith(b'BM'):
+            # Read width and height from BMP header
+            width = (header[18] << 0) | (header[19] << 8) | (header[20] << 16) | (header[21] << 24)
+            height = (header[22] << 0) | (header[23] << 8) | (header[24] << 16) | (header[25] << 24)
+            return width, height
+        
+        else:
+            raise IOError(f"Unsupported image format: {image_path.suffix}")
 
 
 def collect_image_paths(images_dir: Path) -> List[Path]:
