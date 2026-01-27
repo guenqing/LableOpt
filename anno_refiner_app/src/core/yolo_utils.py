@@ -94,10 +94,11 @@ def pixel_to_yolo(x1: float, y1: float, x2: float, y2: float,
         return 0.0, 0.0, 0.0, 0.0
     
     # Calculate YOLO coordinates with precision handling
-    cx = round(((x1 + x2) / 2) / img_w, 6)
-    cy = round(((y1 + y2) / 2) / img_h, 6)
-    w = round((x2 - x1) / img_w, 6)
-    h = round((y2 - y1) / img_h, 6)
+    # Use precise calculation without rounding to maintain accuracy
+    cx = ((x1 + x2) / 2) / img_w
+    cy = ((y1 + y2) / 2) / img_h
+    w = (x2 - x1) / img_w
+    h = (y2 - y1) / img_h
     
     # Ensure coordinates are within normalized range [0, 1]
     cx = max(0.0, min(cx, 1.0))
@@ -139,11 +140,8 @@ def read_yolo_label(label_path: Path, img_w: int, img_h: int,
                     class_id = int(parts[0])
                     cx, cy, w, h = map(float, parts[1:5])
                     
-                    # Validate YOLO coordinates (should be in [0, 1] range)
-                    if not (0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0 and 
-                            0.0 <= w <= 1.0 and 0.0 <= h <= 1.0):
-                        logger.warning(f"Invalid YOLO coordinates in {label_path}: {cx}, {cy}, {w}, {h}")
-                        continue
+                    # Allow YOLO coordinates outside [0, 1] range - yolo_to_pixel will handle clamping
+                    # This prevents filtering valid boxes with coordinates slightly outside bounds due to floating point errors
                     
                     x1, y1, x2, y2 = yolo_to_pixel(cx, cy, w, h, img_w, img_h)
                     box_dict = {

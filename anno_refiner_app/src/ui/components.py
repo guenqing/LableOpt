@@ -582,20 +582,12 @@ class InteractiveAnnotator:
         if not all_boxes:
             return
         
-        # Debug: Print actual box coordinates
-        print("=== Auto Focus Debug Info ===")
-        for i, box in enumerate(all_boxes):
-            print(f"Box {i} ({box.source}): x={box.x}, y={box.y}, w={box.w}, h={box.h}, x+w={box.x+box.w}, y+h={box.y+box.h}")
-        
         # Calculate union of all boxes
         # Use all boxes' coordinates - no box should be left out
         min_x = min(box.x for box in all_boxes)
         min_y = min(box.y for box in all_boxes)
         max_x = max(box.x + box.w for box in all_boxes)
         max_y = max(box.y + box.h for box in all_boxes)
-        
-        # Debug: Print raw box boundaries
-        print(f"Raw box boundaries: min_x={min_x}, min_y={min_y}, max_x={max_x}, max_y={max_y}")
         
         # Calculate symmetric buffer that considers the entire viewport
         # Use the same buffer for all sides
@@ -618,16 +610,10 @@ class InteractiveAnnotator:
         if box_width <= 0 or box_height <= 0:
             return
         
-        # Debug: Print buffered boundaries
-        print(f"Buffered boundaries: min_x={min_x}, min_y={min_y}, max_x={max_x}, max_y={max_y}")
-        print(f"Box area: width={box_width}, height={box_height}")
-        
         # Get scale at 1x zoom
         scale_1x = self._get_viewer_scale_1x()
         if scale_1x <= 0:
             return
-        
-        print(f"Image size: {self.image_width}x{self.image_height}, View size: {self.view_width}x{self.view_height}, Scale_1x: {scale_1x}")
         
         # Calculate optimal zoom level with appropriate margin
         # At zoom level Z, visible area in image coords: view_width/(Z*scale_1x) x view_height/(Z*scale_1x)
@@ -643,22 +629,14 @@ class InteractiveAnnotator:
         
         optimal_zoom = min(zoom_x, zoom_y)
         
-        # Debug: Print zoom calculation
-        print(f"Visible area needed: {visible_width_needed}x{visible_height_needed}")
-        print(f"Calculated zoom: x={zoom_x}, y={zoom_y}, optimal={optimal_zoom}")
-        
         # Round to nearest 0.2 level and clamp to available zoom levels
         optimal_zoom = max(1.0, min(optimal_zoom, 20.0))
         optimal_zoom = round(optimal_zoom * 5) / 5  # Round to nearest 0.2
-        
-        print(f"Final zoom: {optimal_zoom}")
         
         # Calculate center of boxes - use the original box center without buffer
         # This ensures we're focusing on the actual content
         original_center_x = (min(box.x for box in all_boxes) + max(box.x + box.w for box in all_boxes)) / 2
         original_center_y = (min(box.y for box in all_boxes) + max(box.y + box.h for box in all_boxes)) / 2
-        
-        print(f"Focus center: ({original_center_x}, {original_center_y})")
         
         # Set zoom using the set_zoom method with the original center of boxes as focus point
         self.set_zoom(float(optimal_zoom), focus_point=(original_center_x, original_center_y))
@@ -844,7 +822,7 @@ class InteractiveAnnotator:
         self._update_scrollbars()
     
     def _constrain_pan(self) -> None:
-        """Constrain pan to keep image visible in viewport"""
+        """Constrain pan to keep image mostly visible, allowing some boundary overscroll for better box visibility"""
         if self.zoom <= 1.0:
             self.pan_x = 0
             self.pan_y = 0
@@ -857,11 +835,15 @@ class InteractiveAnnotator:
         visible_width = self.view_width / (self.zoom * scale_1x)
         visible_height = self.view_height / (self.zoom * scale_1x)
         
-        max_pan_x = max(0, self.image_width - visible_width)
-        max_pan_y = max(0, self.image_height - visible_height)
+        # Allow some overscroll beyond image boundaries (10% of visible area)
+        overscroll = 0.1
+        min_pan_x = -visible_width * overscroll
+        min_pan_y = -visible_height * overscroll
+        max_pan_x = max(0, self.image_width - visible_width + visible_width * overscroll)
+        max_pan_y = max(0, self.image_height - visible_height + visible_height * overscroll)
         
-        self.pan_x = max(0, min(self.pan_x, max_pan_x))
-        self.pan_y = max(0, min(self.pan_y, max_pan_y))
+        self.pan_x = max(min_pan_x, min(self.pan_x, max_pan_x))
+        self.pan_y = max(min_pan_y, min(self.pan_y, max_pan_y))
     
     # ==================== Private Methods ====================
     
