@@ -284,7 +284,7 @@ class AnnotatorPage:
                         ui.button('Reset', on_click=self._zoom_reset).props('flat dense size=sm').tooltip('重置缩放')
                     
                     self.zoom_slider = ui.slider(
-                        min=1, max=20, step=0.2, value=1,
+                        min=1, max=20, step=0.01, value=1,
                         on_change=self._on_zoom_slider
                     ).classes('w-full')
                 
@@ -539,7 +539,7 @@ class AnnotatorPage:
     
     def _on_zoom_changed(self, zoom: float):
         """Handle zoom change from annotator"""
-        self.zoom_label.text = f'{zoom:.1f}x'
+        self.zoom_label.text = f'{zoom:.2f}x'
         if self.zoom_slider:
             self.zoom_slider.value = zoom
     

@@ -40,8 +40,8 @@ class InteractiveAnnotator:
     MIN_BOX_SIZE = 5  # Minimum box dimension in pixels
     MAX_HISTORY = 50  # Maximum undo history
     
-    # Available zoom levels (as multipliers)
-    ZOOM_LEVELS = [i * 0.2 for i in range(5, 101)]  # 1.0, 1.2, 1.4, ..., 20.0
+    # Zoom step for button-based zooming
+    ZOOM_STEP = 0.05  # Smaller step for smoother zooming
     
     def __init__(self, on_change: Callable[[List[BBox]], None] = None,
                  on_zoom_change: Callable[[float], None] = None,
@@ -450,9 +450,8 @@ class InteractiveAnnotator:
             zoom: Target zoom level
             focus_point: (x, y) in image coordinates to keep centered. If None, auto-determine.
         """
-        # Clamp to range and round to nearest 0.2
+        # Clamp to range (1.0 - 20.0)
         new_zoom = max(1.0, min(zoom, 20.0))
-        new_zoom = round(new_zoom * 5) / 5  # Round to nearest 0.2
         
         if new_zoom == self.zoom:
             return
@@ -564,12 +563,12 @@ class InteractiveAnnotator:
             self.on_zoom_change(self.zoom)
     
     def zoom_in(self) -> None:
-        """Zoom in by 0.2 level"""
-        self.set_zoom(self.zoom + 0.2)
+        """Zoom in by small step"""
+        self.set_zoom(self.zoom + self.ZOOM_STEP)
     
     def zoom_out(self) -> None:
-        """Zoom out by 0.2 level"""
-        self.set_zoom(self.zoom - 0.2)
+        """Zoom out by small step"""
+        self.set_zoom(self.zoom - self.ZOOM_STEP)
     
     def auto_focus_boxes(self) -> None:
         """Automatically set zoom and pan to focus on all boxes (GT + Pred)
@@ -629,9 +628,8 @@ class InteractiveAnnotator:
         
         optimal_zoom = min(zoom_x, zoom_y)
         
-        # Round to nearest 0.2 level and clamp to available zoom levels
+        # Clamp to range (1.0 - 20.0)
         optimal_zoom = max(1.0, min(optimal_zoom, 20.0))
-        optimal_zoom = round(optimal_zoom * 5) / 5  # Round to nearest 0.2
         
         # Calculate center of boxes - use the original box center without buffer
         # This ensures we're focusing on the actual content
@@ -877,23 +875,52 @@ class InteractiveAnnotator:
         Only renders boxes where:
         - Global show flag is True (show_gt or show_pred)
         - Individual box visible attribute is True
+        
+        Implements intelligent label positioning:
+        - GT labels on top-left, Pred labels on top-right
+        - No overlapping labels through vertical offset
+        - Merged multi-line labels for highly overlapping cases
+        - Boundary-friendly positioning
         """
         if not self.image_component:
             return
         
         svg_parts = []
         
-        # Render GT boxes (check both global flag and individual visible)
+        # Track rendered labels for each source type (GT/Pred)
+        # Structure: {source: [{label_info}, ...]}
+        # label_info: {x, y, width, height, box_ids, labels, colors}
+        rendered_labels = {
+            'gt': [],
+            'pred': []
+        }
+        
+        # First render all boxes (without labels)
+        # Render GT boxes
         if self.show_gt:
             for box in self.gt_boxes:
                 if getattr(box, 'visible', True):
-                    svg_parts.append(self._render_box(box))
+                    svg_parts.append(self._render_box_without_label(box))
         
         # Render Pred boxes
         if self.show_pred:
             for box in self.pred_boxes:
                 if getattr(box, 'visible', True):
-                    svg_parts.append(self._render_box(box))
+                    svg_parts.append(self._render_box_without_label(box))
+        
+        # First pass: collect all labels and detect overlaps for merging
+        if self.show_gt:
+            for box in self.gt_boxes:
+                if getattr(box, 'visible', True):
+                    self._collect_label_info(box, rendered_labels)
+        
+        if self.show_pred:
+            for box in self.pred_boxes:
+                if getattr(box, 'visible', True):
+                    self._collect_label_info(box, rendered_labels)
+        
+        # Second pass: render all collected labels (including merged ones)
+        self._render_all_labels(rendered_labels, svg_parts)
         
         # Render handles for selected box (only if editable and visible)
         selected_box = self.get_selected_box()
@@ -902,6 +929,154 @@ class InteractiveAnnotator:
                 svg_parts.append(self._render_handles(selected_box))
         
         self.image_component.set_content(''.join(svg_parts))
+    
+    def _collect_label_info(self, box: BBox, rendered_labels: dict) -> None:
+        """Collect label information and handle merging for highly overlapping labels
+        
+        Args:
+            box: Bounding box to process
+            rendered_labels: Dictionary to track all rendered labels
+        """
+        source = box.source.value if isinstance(box.source, BoxSource) else box.source
+        
+        # Label text
+        label = f"{box.class_id}"
+        
+        # Calculate background width based on number of digits
+        bg_width = 20 if box.class_id < 10 else 28
+        label_height = 18
+        
+        # Determine base label position based on source
+        if source == 'gt':
+            # GT labels on top-left
+            base_x = box.x
+            base_y = box.y
+        else:  # pred
+            # Pred labels on top-right
+            base_x = box.x + box.w - bg_width
+            base_y = box.y
+        
+        # Check if we can merge with existing highly overlapping labels (max 4 lines)
+        for existing_label in rendered_labels[source]:
+            # Calculate overlap area
+            overlap_x1 = max(base_x, existing_label['x'])
+            overlap_y1 = max(base_y - label_height, existing_label['y'])
+            overlap_x2 = min(base_x + bg_width, existing_label['x'] + existing_label['width'])
+            overlap_y2 = min(base_y, existing_label['y'] + existing_label['height'])
+            
+            if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+                # High overlap detected, check if we can merge (max 4 lines)
+                if len(existing_label['labels']) < 4:
+                    # Merge with existing label
+                    existing_label['labels'].append(label)
+                    existing_label['box_ids'].append(box.id)
+                    existing_label['colors'].append(self.COLORS[source]['normal'])
+                    
+                    # Expand label height for merged content
+                    existing_label['height'] += label_height
+                    return
+        
+        # No merging, track as new label
+        rendered_labels[source].append({
+            'x': base_x,
+            'y': base_y - label_height,
+            'width': bg_width,
+            'height': label_height,
+            'box_ids': [box.id],
+            'labels': [label],
+            'colors': [self.COLORS[source]['normal']]
+        })
+    
+    def _render_all_labels(self, rendered_labels: dict, svg_parts: list) -> None:
+        """Render all collected labels with intelligent positioning
+        
+        Args:
+            rendered_labels: Dictionary of all labels to render
+            svg_parts: List to append SVG content to
+        """
+        for source, labels in rendered_labels.items():
+            # For each source, find non-overlapping positions for all labels
+            positioned_labels = []
+            
+            for label_info in labels:
+                # Find non-overlapping position for this label
+                x, y = self._find_non_overlapping_position(label_info, positioned_labels)
+                
+                # Ensure label stays within image boundaries
+                label_height = 18
+                max_width = max(20 if int(label) < 10 else 28 for label in label_info['labels'])
+                
+                x = max(0, x)
+                y = max(0, y)
+                
+                # Check if label would go beyond image boundaries
+                if x + max_width > self.image_width:
+                    x = self.image_width - max_width
+                if y + label_info['height'] > self.image_height:
+                    y = self.image_height - label_info['height']
+                
+                # Update label position
+                positioned_label = label_info.copy()
+                positioned_label['x'] = x
+                positioned_label['y'] = y
+                positioned_label['width'] = max_width
+                positioned_labels.append(positioned_label)
+            
+            # Now render all positioned labels
+            for label_info in positioned_labels:
+                # Render background rectangle
+                svg_parts.append(f'''<rect x="{label_info['x']}" y="{label_info['y']}" width="{label_info['width']}" height="{label_info['height']}" 
+                      fill="white" fill-opacity="0.85" rx="2"/>''')
+                
+                # Render each label in the multi-line label
+                for i, (label, color) in enumerate(zip(label_info['labels'], label_info['colors'])):
+                    text_y = label_info['y'] + 15 + (i * 18)  # 15 is for vertical centering in each line
+                    svg_parts.append(f'''<text x="{label_info['x'] + 3}" y="{text_y}" 
+                        font-size="16" font-family="Arial" font-weight="bold"
+                        fill="{color}">{label}</text>''')
+    
+    def _find_non_overlapping_position(self, new_label: dict, positioned_labels: list) -> tuple:
+        """Find a non-overlapping position for a new label
+        
+        Args:
+            new_label: New label to position
+            positioned_labels: List of already positioned labels
+        
+        Returns:
+            (x, y) - Position coordinates for the new label
+        """
+        x = new_label['x']
+        y = new_label['y']
+        width = new_label['width']
+        height = new_label['height']
+        
+        offset = 0
+        max_offset = 10  # Limit offset to prevent labels from going too far
+        
+        while offset < max_offset:
+            current_y = y - (offset * 18)  # 18 is label height
+            current_x = x
+            
+            # Check if this position overlaps with any existing label
+            overlap_found = False
+            for existing_label in positioned_labels:
+                # Calculate overlap
+                overlap_x1 = max(current_x, existing_label['x'])
+                overlap_y1 = max(current_y, existing_label['y'])
+                overlap_x2 = min(current_x + width, existing_label['x'] + existing_label['width'])
+                overlap_y2 = min(current_y + height, existing_label['y'] + existing_label['height'])
+                
+                if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+                    overlap_found = True
+                    break
+            
+            if not overlap_found:
+                return (current_x, current_y)
+            
+            offset += 1
+        
+        # If no good position found, just use the base position
+        return (x, y)
     
     def _render_box(self, box: BBox) -> str:
         """Render a single bounding box as SVG
@@ -950,6 +1125,33 @@ class InteractiveAnnotator:
             fill="{color}">{label}</text>'''
         
         return svg
+    
+    def _render_box_without_label(self, box: BBox) -> str:
+        """Render a single bounding box as SVG without label
+        
+        - editable=True: solid line
+        - editable=False: dashed line
+        - Color is determined by source (GT=green, Pred=blue)
+        """
+        is_selected = box.id == self.selected_box_id
+        source = box.source.value if isinstance(box.source, BoxSource) else box.source
+        
+        color = self.COLORS[source]['selected' if is_selected else 'normal']
+        stroke_width = 3 if is_selected else 2
+        
+        # Editable boxes use solid line, non-editable use dashed line
+        editable = getattr(box, 'editable', True)
+        dash_array = '' if editable else '5,5'
+        
+        # Box rectangle
+        rect_attrs = f'x="{box.x}" y="{box.y}" width="{box.w}" height="{box.h}"'
+        rect_style = f'fill="none" stroke="{color}" stroke-width="{stroke_width}"'
+        if dash_array:
+            rect_style += f' stroke-dasharray="{dash_array}"'
+        
+        return f'<rect {rect_attrs} {rect_style} data-box-id="{box.id}"/>'
+    
+
     
     def _render_handles(self, box: BBox) -> str:
         """Render resize handles for selected box"""
