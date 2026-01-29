@@ -22,8 +22,8 @@ class AnnotatorPage:
     
     def __init__(self):
         # Auto save flag
-        self.auto_save_enabled: bool = False
-        self.save_unmodified_enabled: bool = False
+        self.auto_save_enabled: bool = True
+        self.save_unmodified_enabled: bool = True
         self.auto_focus_enabled: bool = True
         
         # Current GT boxes (from annotator component)
@@ -324,12 +324,12 @@ class AnnotatorPage:
                 with ui.column().classes('gap-2 w-full'):
                     self.auto_save_checkbox = ui.checkbox(
                         'Auto Save',
-                        value=False,
+                        value=True,
                         on_change=lambda e: setattr(self, 'auto_save_enabled', e.value)
                     ).classes('text-sm')
                     self.save_unmodified_checkbox = ui.checkbox(
                         'Save Unmodified',
-                        value=False,
+                        value=True,
                         on_change=lambda e: setattr(self, 'save_unmodified_enabled', e.value)
                     ).classes('text-sm')
                     
