@@ -1,8 +1,8 @@
 # Refiner 系统技术文档
 
-> 最后更新: 2026-01-23
+> 最后更新: 2026-01-30
 > 
-> 最新更新: Annotator 新增 Auto Focus 可选开关；Dashboard 改为手动 `Parse Data` 解析；Pending 口径改为集合论缺省视为全集并输出 missing_img；路径必填规则调整（Images+Output）；修复 Annotator 返回 Dashboard 需二次点击；GT/Pred 加载可选化；Annotator 快捷键 Tab 改为 ·；新增 Save Unmodified。
+> 最新更新: 无极缩放（1x-20x任意倍数，0.01步长）；自动聚焦算法优化；标签渲染智能合并与防重叠；默认启用自动保存和保存未修改；DLL加载问题修复；YOLO坐标转换精度改进；允许10%边界外滚动；新增内部标注一致性检测工具（findInconsistentAnno_internal.py）。
 
 ## 系统功能与逻辑概述
 
@@ -93,7 +93,8 @@ refiner/
 │       │   ├── yolo_utils.py      # YOLO 格式转换工具
 │       │   ├── file_manager.py   # 文件备份/临时文件管理/输出路径管理
 │       │   ├── path_utils.py      # Base Dir 相对路径解析
-│       │   └── analyzer.py        # Cleanlab 分析器（支持样本过滤）
+│       │   ├── analyzer.py        # Cleanlab 分析器（支持样本过滤）
+│       │   └── findInconsistentAnno_internal.py  # 内部标注一致性检测工具
 │       └── ui/
 │           ├── components.py      # InteractiveAnnotator 组件
 │           ├── page_dashboard.py  # Dashboard 页面
@@ -179,13 +180,21 @@ def yolo_to_pixel(cx: float, cy: float, w: float, h: float,
 
 def pixel_to_yolo(x1: float, y1: float, x2: float, y2: float,
                   img_w: int, img_h: int) -> Tuple[float, float, float, float]:
-    """像素坐标 (x1, y1, x2, y2) → YOLO 归一化坐标"""
+    """像素坐标 (x1, y1, x2, y2) → YOLO 归一化坐标
+    
+    注意: 保留完整精度，不进行舍入操作
+    """
     cx = ((x1 + x2) / 2) / img_w
     cy = ((y1 + y2) / 2) / img_h
     w = (x2 - x1) / img_w
     h = (y2 - y1) / img_h
     return cx, cy, w, h
 ```
+
+**坐标精度改进**:
+- `pixel_to_yolo` 函数移除了坐标舍入操作，保留完整精度
+- YOLO标签读取时放宽坐标范围验证，允许边界外的浮点误差
+- 提高了坐标转换的精确性，避免因舍入造成的框位置偏移
 
 #### 并行处理策略
 
@@ -496,8 +505,8 @@ def _generate_visualization(self, item: IssueItem) -> str:
 │          │          │          │  [Activate Reference]       │
 │          │          │          │                             │
 │          │          │          │ Save Controls                │
-│          │          │          │  [ ] Auto Save              │
-│          │          │          │  [ ] Save Unmodified        │
+│          │          │          │  [x] Auto Save (默认启用)   │
+│          │          │          │  [x] Save Unmodified (默认) │
 │          │          │          │  [Save]                     │
 │          │          │          │  [Go Back to Analysis]      │
 └──────────┴──────────┴──────────┴─────────────────────────────┘
@@ -544,8 +553,8 @@ def _on_back(self):
 ```
 
 **自动保存逻辑**:
-- Auto Save 开启时，切换图片会自动保存
-- Save Unmodified 开启时，即使未修改也会保存当前可编辑框
+- Auto Save 默认开启，切换图片会自动保存
+- Save Unmodified 默认开启，即使未修改也会保存当前可编辑框
 
 **近期交互/兼容性修复**:
 - `Go Back to Analysis` 的确认对话框按钮回调改为直接 `await`（避免 `create_task` 丢失 client 上下文导致需要二次点击返回）
@@ -624,12 +633,26 @@ def activate_reference(self):
 
 **修复内容**:
 - 移除了创建框功能在放大状态下的限制
-- 现在可以在任意缩放级别（1x-10x）下通过鼠标拖拽创建标注框
+- 现在可以在任意缩放级别（1x-20x）下通过鼠标拖拽创建标注框
 - `interactive_image` 组件提供的 `image_x/image_y` 已经是图像坐标系坐标（不受CSS transform影响），可以直接使用
 
 **实现细节**:
 - 在 `_on_mouse_down` 方法中，移除了 `elif self.zoom <= 1.0:` 的条件限制
 - 空白区域拖拽时，无论当前缩放级别如何，都可以创建新框
+
+#### 标签渲染优化
+
+**智能合并与防重叠**:
+- 当多个框重叠时，标签文本会智能合并显示，避免遮挡
+- 标签位置自动调整，防止与相邻框的标签重叠
+- 提升密集标注场景下的可读性
+
+#### 视图边界处理
+
+**允许10%边界外滚动**:
+- 视图平移时允许超出图像边界10%的范围
+- 便于查看和编辑位于图像边缘的标注框
+- 改善边界区域的操作体验
 
 #### 显示选项同步
 
@@ -916,12 +939,12 @@ Pred boxes:  editable=True    (变为可编辑)
 #### 缩放级别与快捷键
 
 ```python
-# 缩放级别: 1x 到 10x
-ZOOM_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+# 无极缩放: 1x 到 20x 任意倍数，步长 0.01
+# 不再使用固定级别列表，支持连续缩放
 
 # 快捷键
-# = / + : 放大一级
-# -     : 缩小一级
+# = / + : 放大
+# -     : 缩小
 # 0     : 重置到 1x
 ```
 
