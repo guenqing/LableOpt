@@ -1,8 +1,8 @@
 # Refiner 系统技术文档
 
-> 最后更新: 2026-01-30
+> 最后更新: 2026-01-31
 > 
-> 最新更新: 无极缩放（1x-20x任意倍数，0.01步长）；自动聚焦算法优化；标签渲染智能合并与防重叠；默认启用自动保存和保存未修改；DLL加载问题修复；YOLO坐标转换精度改进；允许10%边界外滚动；新增内部标注一致性检测工具（findInconsistentAnno_internal.py）。
+> 最新更新: 增加 Extend GT to Next（跨帧复用可编辑框，默认开启，快捷键 y）；无极缩放（1x-20x任意倍数，0.01步长）；自动聚焦算法优化；标签渲染智能合并与防重叠；默认启用自动保存和保存未修改；DLL加载问题修复；YOLO坐标转换精度改进；允许10%边界外滚动；新增内部标注一致性检测工具（findInconsistentAnno_internal.py）。
 
 ## 系统功能与逻辑概述
 
@@ -505,6 +505,7 @@ def _generate_visualization(self, item: IssueItem) -> str:
 │          │          │          │  [Activate Reference]       │
 │          │          │          │                             │
 │          │          │          │ Save Controls                │
+│          │          │          │  [x] Extend GT to Next (默认)│
 │          │          │          │  [x] Auto Save (默认启用)   │
 │          │          │          │  [x] Save Unmodified (默认) │
 │          │          │          │  [Save]                     │
@@ -555,6 +556,13 @@ def _on_back(self):
 **自动保存逻辑**:
 - Auto Save 默认开启，切换图片会自动保存
 - Save Unmodified 默认开启，即使未修改也会保存当前可编辑框
+
+**Extend GT to Next（跨帧复用可编辑框）**:
+- UI 位置：Annotator 右侧 `Save Controls` 区域，默认开启
+- 快捷键：`y` 切换开/关
+- 行为：进入下一帧时，先将上一帧的可编辑框复制到下一帧（作为 GT，可编辑），再做去重：如果复制来的框与下一帧已有可编辑框“同类别且 IoU > 0.45”，则丢弃复制框（优先保留下一帧已有框）；其它复制框会被追加到下一帧
+- 坐标策略：复制使用 YOLO 归一化坐标（相对坐标），在下一帧按目标分辨率还原为像素框，适配分辨率变化
+- Auto Save 兼容：当 Extend 在下一帧实际追加了复制框时，会将该帧标记为 `modified`，确保在关闭 `Save Unmodified` 时切图仍会触发自动保存
 
 **近期交互/兼容性修复**:
 - `Go Back to Analysis` 的确认对话框按钮回调改为直接 `await`（避免 `create_task` 丢失 client 上下文导致需要二次点击返回）

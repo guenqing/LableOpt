@@ -11,6 +11,7 @@ from nicegui import ui
 from ..state import app_state
 from ..models import BBox, BoxSource, IssueItem, IssueType
 from ..core.yolo_utils import read_yolo_label, get_image_size
+from ..core.extend_gt_utils import editable_boxes_to_yolo, apply_extend_gt_to_next
 from ..core.file_manager import save_tmp_annotation, get_tmp_files, confirm_changes_for_tmp_files
 from .components import InteractiveAnnotator
 
@@ -25,12 +26,17 @@ class AnnotatorPage:
         self.auto_save_enabled: bool = True
         self.save_unmodified_enabled: bool = True
         self.auto_focus_enabled: bool = True
+        self.extend_gt_to_next_enabled: bool = True
         
         # Current GT boxes (from annotator component)
         self.current_gt_boxes: List[BBox] = []
         
         # Track if current image has unsaved changes
         self.boxes_modified: bool = False
+
+        # Extend GT to Next state (cached from previous frame)
+        self._pending_extend_gt_to_next: bool = False
+        self._cached_editable_yolo: List[dict] = []
         
         # UI components
         self.annotator: Optional[InteractiveAnnotator] = None
@@ -45,6 +51,7 @@ class AnnotatorPage:
         self.show_gt_checkbox = None
         self.show_pred_checkbox = None
         self.auto_focus_checkbox = None
+        self.extend_gt_to_next_checkbox = None
         self.auto_save_checkbox = None
         self.save_unmodified_checkbox = None
         
@@ -322,6 +329,11 @@ class AnnotatorPage:
                 # Save Controls
                 ui.label('Save Controls').classes('text-sm font-bold text-gray-700')
                 with ui.column().classes('gap-2 w-full'):
+                    self.extend_gt_to_next_checkbox = ui.checkbox(
+                        'Extend GT to Next',
+                        value=True,
+                        on_change=lambda e: setattr(self, 'extend_gt_to_next_enabled', bool(e.value)),
+                    ).classes('text-sm')
                     self.auto_save_checkbox = ui.checkbox(
                         'Auto Save',
                         value=True,
@@ -352,6 +364,7 @@ class AnnotatorPage:
                 with ui.expansion('Keyboard Shortcuts', icon='keyboard').classes('w-full text-xs'):
                     with ui.column().classes('gap-1 text-gray-600'):
                         ui.label('[ / ] - Prev/Next image')
+                        ui.label('y - Toggle Extend GT to Next')
                         ui.label('· - Cycle selection')
                         ui.label('Del/Backspace - Delete box')
                         ui.label('Arrow keys - Move box')
@@ -390,9 +403,30 @@ class AnnotatorPage:
         
         # Load boxes
         gt_boxes, pred_boxes = self._load_boxes(item)
+
+        # Apply "Extend GT to Next" (only when entering next frame)
+        injected_count = 0
+        if self._pending_extend_gt_to_next:
+            try:
+                img_w = int(self.annotator.image_width)
+                img_h = int(self.annotator.image_height)
+                gt_boxes, pred_boxes, injected_count = apply_extend_gt_to_next(
+                    gt_boxes,
+                    pred_boxes,
+                    self._cached_editable_yolo,
+                    img_w,
+                    img_h,
+                )
+            finally:
+                # One-shot behavior: only apply to the immediate next frame
+                self._pending_extend_gt_to_next = False
+                self._cached_editable_yolo = []
+
         self.annotator.load_boxes(gt_boxes, pred_boxes)
         self.current_gt_boxes = self.annotator.get_gt_boxes()
-        self.boxes_modified = False
+        # If Extend injected/cleared boxes, treat the frame as modified so Auto Save works
+        # even when "Save Unmodified" is disabled.
+        self.boxes_modified = injected_count > 0
         
         # Auto-focus on boxes after loading image and boxes
         # auto_focus_boxes() will call on_zoom_change callback to update UI
@@ -632,6 +666,7 @@ class AnnotatorPage:
     def _on_next(self):
         """Go to next image"""
         if app_state.current_annotation_index < len(app_state.annotation_queue) - 1:
+            self._prepare_extend_gt_to_next_if_needed()
             self._before_navigate()
             app_state.current_annotation_index += 1
             self._load_current_image()
@@ -644,6 +679,30 @@ class AnnotatorPage:
     def _should_auto_save(self) -> bool:
         """Return whether auto-save should run on navigation"""
         return self.auto_save_enabled and (self.boxes_modified or self.save_unmodified_enabled)
+
+    def _prepare_extend_gt_to_next_if_needed(self) -> None:
+        """Cache current editable boxes for applying to the next frame."""
+        if not self.extend_gt_to_next_enabled:
+            self._pending_extend_gt_to_next = False
+            self._cached_editable_yolo = []
+            return
+        if not self.annotator:
+            self._pending_extend_gt_to_next = False
+            self._cached_editable_yolo = []
+            return
+        if self.annotator.image_width <= 0 or self.annotator.image_height <= 0:
+            self._pending_extend_gt_to_next = False
+            self._cached_editable_yolo = []
+            return
+
+        all_boxes = self.annotator.get_all_boxes()
+        self._cached_editable_yolo = editable_boxes_to_yolo(
+            all_boxes,
+            int(self.annotator.image_width),
+            int(self.annotator.image_height),
+        )
+        self._pending_extend_gt_to_next = True
+        logger.info(f'Extend GT to Next: cached {len(self._cached_editable_yolo)} editable boxes for next frame')
     
     def _handle_page_keys(self, e):
         """Handle page-level keyboard events"""
@@ -661,6 +720,20 @@ class AnnotatorPage:
         if key_name == 'BracketRight' or key_name == ']':
             self._on_next()
             return
+
+        # y toggles "Extend GT to Next"
+        if not e.modifiers.ctrl and not e.modifiers.alt and not e.modifiers.shift:
+            if str(key_name).lower() == 'y':
+                self.extend_gt_to_next_enabled = not self.extend_gt_to_next_enabled
+                if self.extend_gt_to_next_checkbox is not None:
+                    self.extend_gt_to_next_checkbox.value = self.extend_gt_to_next_enabled
+                ui.notify(
+                    f'Extend GT to Next: {"ON" if self.extend_gt_to_next_enabled else "OFF"}',
+                    type='info',
+                    position='bottom-right',
+                    timeout=1200,
+                )
+                return
     
     async def _on_back(self):
         """Handle back button click"""
