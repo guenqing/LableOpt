@@ -1,8 +1,8 @@
 # Refiner 系统技术文档
 
-> 最后更新: 2026-01-31
+> 最后更新: 2026-02-04
 > 
-> 最新更新: 增加 Extend GT to Next（跨帧复用可编辑框，默认开启，快捷键 y）；无极缩放（1x-20x任意倍数，0.01步长）；自动聚焦算法优化；标签渲染智能合并与防重叠；默认启用自动保存和保存未修改；DLL加载问题修复；YOLO坐标转换精度改进；允许10%边界外滚动；新增内部标注一致性检测工具（findInconsistentAnno_internal.py）。
+> 最新更新: Extend GT to Next 增加子开关 Prefer Previous on Overlap（同类组替代 + 重叠采纳前一帧）；支持关闭 Extend 主开关即时回滚当前帧 Extend 结果（使用独立备份文件，不占用 *_tmp.txt）；无极缩放（1x-20x任意倍数，0.01步长）；自动聚焦算法优化；标签渲染智能合并与防重叠；默认启用自动保存和保存未修改；DLL加载问题修复；YOLO坐标转换精度改进；允许10%边界外滚动；新增内部标注一致性检测工具（findInconsistentAnno_internal.py）。
 
 ## 系统功能与逻辑概述
 
@@ -506,6 +506,7 @@ def _generate_visualization(self, item: IssueItem) -> str:
 │          │          │          │                             │
 │          │          │          │ Save Controls                │
 │          │          │          │  [x] Extend GT to Next (默认)│
+│          │          │          │  [ ] Prefer Previous on Overlap│
 │          │          │          │  [x] Auto Save (默认启用)   │
 │          │          │          │  [x] Save Unmodified (默认) │
 │          │          │          │  [Save]                     │
@@ -560,9 +561,24 @@ def _on_back(self):
 **Extend GT to Next（跨帧复用可编辑框）**:
 - UI 位置：Annotator 右侧 `Save Controls` 区域，默认开启
 - 快捷键：`y` 切换开/关
-- 行为：进入下一帧时，先将上一帧的可编辑框复制到下一帧（作为 GT，可编辑），再做去重：如果复制来的框与下一帧已有可编辑框“同类别且 IoU > 0.45”，则丢弃复制框（优先保留下一帧已有框）；其它复制框会被追加到下一帧
+- 行为：进入下一帧时，先将上一帧的可编辑框复制到下一帧（作为 GT，可编辑），再做去重：如果复制来的框与下一帧已有可编辑框“同类别且 IoU > 0.2”，则丢弃复制框（优先保留下一帧已有框）；其它复制框会被追加到下一帧
 - 坐标策略：复制使用 YOLO 归一化坐标（相对坐标），在下一帧按目标分辨率还原为像素框，适配分辨率变化
 - Auto Save 兼容：当 Extend 在下一帧实际追加了复制框时，会将该帧标记为 `modified`，确保在关闭 `Save Unmodified` 时切图仍会触发自动保存
+
+**Prefer Previous on Overlap（Extend 子开关）**:
+- 仅在 `Extend GT to Next` 开启时可勾选并生效
+- 含义：允许“同类组替代”，并在重叠时优先采纳前一帧（删除后一帧重叠的可编辑框，保留复制框）
+- 同类组替代规则：
+  - 前一帧 `0` 或 `2` 可替代后一帧的 `0/2`
+  - 前一帧 `1` 或 `3` 可替代后一帧的 `1/3`
+  - 其它类别默认只替代自身类别
+- 重叠判定：与后一帧**可编辑框**满足 `IoU > 0.2` 且同替代组时触发替代；Pred 默认不可编辑，因此默认不会被替代删除
+
+**关闭 Extend 回滚（当前帧）**:
+- 如果某帧是通过 Extend 生成/修改的，系统会在应用 Extend 前，将该帧原始 `GT/Pred` 框备份到 Output 下的独立文件：
+  - `Output Path/.refiner_extend_backups/<relative_image_path>.json`
+  - 文件名与 `*_tmp.txt` 无冲突，不会影响保存/确认流程
+- 当你停留在该帧并关闭 `Extend GT to Next` 主开关时，会立刻从备份恢复该帧原标注（不影响你把恢复后的标注继续用于后续帧的 Extend）
 
 **近期交互/兼容性修复**:
 - `Go Back to Analysis` 的确认对话框按钮回调改为直接 `await`（避免 `create_task` 丢失 client 上下文导致需要二次点击返回）

@@ -11,7 +11,14 @@ from nicegui import ui
 from ..state import app_state
 from ..models import BBox, BoxSource, IssueItem, IssueType
 from ..core.yolo_utils import read_yolo_label, get_image_size
-from ..core.extend_gt_utils import editable_boxes_to_yolo, apply_extend_gt_to_next
+from ..core.extend_gt_utils import (
+    editable_boxes_to_yolo,
+    apply_extend_gt_to_next,
+    boxes_to_backup_payload,
+    boxes_from_backup_payload,
+    dumps_backup_payload,
+    loads_backup_payload,
+)
 from ..core.file_manager import save_tmp_annotation, get_tmp_files, confirm_changes_for_tmp_files
 from .components import InteractiveAnnotator
 
@@ -27,6 +34,8 @@ class AnnotatorPage:
         self.save_unmodified_enabled: bool = True
         self.auto_focus_enabled: bool = True
         self.extend_gt_to_next_enabled: bool = True
+        # Sub-toggle for extend: prefer previous-frame labels on overlap
+        self.extend_prefer_previous_on_overlap_enabled: bool = False
         
         # Current GT boxes (from annotator component)
         self.current_gt_boxes: List[BBox] = []
@@ -37,6 +46,8 @@ class AnnotatorPage:
         # Extend GT to Next state (cached from previous frame)
         self._pending_extend_gt_to_next: bool = False
         self._cached_editable_yolo: List[dict] = []
+        # Backup file for undoing extend on current frame (written only when extend is applied)
+        self._extend_backup_path_for_current: Optional[Path] = None
         
         # UI components
         self.annotator: Optional[InteractiveAnnotator] = None
@@ -52,6 +63,7 @@ class AnnotatorPage:
         self.show_pred_checkbox = None
         self.auto_focus_checkbox = None
         self.extend_gt_to_next_checkbox = None
+        self.extend_prefer_previous_on_overlap_checkbox = None
         self.auto_save_checkbox = None
         self.save_unmodified_checkbox = None
         
@@ -332,8 +344,17 @@ class AnnotatorPage:
                     self.extend_gt_to_next_checkbox = ui.checkbox(
                         'Extend GT to Next',
                         value=True,
-                        on_change=lambda e: setattr(self, 'extend_gt_to_next_enabled', bool(e.value)),
+                        on_change=self._on_extend_gt_to_next_toggle,
                     ).classes('text-sm')
+                    self.extend_prefer_previous_on_overlap_checkbox = ui.checkbox(
+                        'Prefer Previous on Overlap',
+                        value=False,
+                        on_change=lambda e: setattr(self, 'extend_prefer_previous_on_overlap_enabled', bool(e.value)),
+                    ).classes('text-sm').tooltip(
+                        '当启用时：同类组(0/2、1/3)且 IoU>0.2 的重叠情况下，优先采纳前一帧（删除后一帧重叠可编辑框）'
+                    )
+                    # Sync initial enabled/disabled state for sub-toggle
+                    self._set_extend_gt_to_next_enabled(self.extend_gt_to_next_enabled)
                     self.auto_save_checkbox = ui.checkbox(
                         'Auto Save',
                         value=True,
@@ -403,6 +424,17 @@ class AnnotatorPage:
         
         # Load boxes
         gt_boxes, pred_boxes = self._load_boxes(item)
+        self._extend_backup_path_for_current = None
+
+        # If Extend will be applied to this frame, backup original boxes first
+        if self._pending_extend_gt_to_next:
+            try:
+                backup_path = self._get_extend_backup_path(item)
+                if backup_path is not None:
+                    self._save_extend_backup(backup_path, gt_boxes, pred_boxes)
+                    self._extend_backup_path_for_current = backup_path
+            except Exception as ex:
+                logger.warning(f'Failed to write extend backup: {ex}')
 
         # Apply "Extend GT to Next" (only when entering next frame)
         injected_count = 0
@@ -416,6 +448,7 @@ class AnnotatorPage:
                     self._cached_editable_yolo,
                     img_w,
                     img_h,
+                    prefer_previous_on_overlap=self.extend_prefer_previous_on_overlap_enabled,
                 )
             finally:
                 # One-shot behavior: only apply to the immediate next frame
@@ -441,6 +474,40 @@ class AnnotatorPage:
         
         # Update box list panel
         self._update_box_list()
+
+    def _get_extend_backup_path(self, item: IssueItem) -> Optional[Path]:
+        """Compute the backup file path for the current frame (not using *_tmp.txt)."""
+        out_root = (app_state.config.output_path or '').strip()
+        if not out_root:
+            return None
+        out_path = Path(out_root)
+        rel = Path(item.image_path)
+        # Store in a hidden subfolder to avoid mixing with output labels and *_tmp.txt
+        backup_root = out_path / '.refiner_extend_backups'
+        # Use the same relative structure, but JSON files
+        return (backup_root / rel).with_suffix('.json')
+
+    def _save_extend_backup(self, path: Path, gt_boxes: List[BBox], pred_boxes: List[BBox]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = boxes_to_backup_payload(gt_boxes, pred_boxes)
+        path.write_text(dumps_backup_payload(payload), encoding='utf-8')
+
+    def _restore_extend_backup_for_current(self) -> bool:
+        """Restore current frame boxes from backup (if present). Returns whether restored."""
+        if not self._extend_backup_path_for_current:
+            return False
+        if not self.annotator:
+            return False
+        path = self._extend_backup_path_for_current
+        if not path.exists():
+            return False
+        payload = loads_backup_payload(path.read_text(encoding='utf-8'))
+        gt_boxes, pred_boxes = boxes_from_backup_payload(payload)
+        self.annotator.load_boxes(gt_boxes, pred_boxes)
+        self.current_gt_boxes = self.annotator.get_gt_boxes()
+        self.boxes_modified = False
+        self._update_box_list()
+        return True
     
     def _update_header_info(self, item: IssueItem, idx: int):
         """Update header labels"""
@@ -724,9 +791,7 @@ class AnnotatorPage:
         # y toggles "Extend GT to Next"
         if not e.modifiers.ctrl and not e.modifiers.alt and not e.modifiers.shift:
             if str(key_name).lower() == 'y':
-                self.extend_gt_to_next_enabled = not self.extend_gt_to_next_enabled
-                if self.extend_gt_to_next_checkbox is not None:
-                    self.extend_gt_to_next_checkbox.value = self.extend_gt_to_next_enabled
+                self._set_extend_gt_to_next_enabled(not self.extend_gt_to_next_enabled)
                 ui.notify(
                     f'Extend GT to Next: {"ON" if self.extend_gt_to_next_enabled else "OFF"}',
                     type='info',
@@ -734,6 +799,40 @@ class AnnotatorPage:
                     timeout=1200,
                 )
                 return
+
+    def _on_extend_gt_to_next_toggle(self, e) -> None:
+        """Handle Extend GT to Next checkbox toggle from UI."""
+        self._set_extend_gt_to_next_enabled(bool(e.value))
+
+    def _set_extend_gt_to_next_enabled(self, enabled: bool) -> None:
+        """Set Extend GT to Next and sync dependent sub-toggle UI/state."""
+        was_enabled = bool(self.extend_gt_to_next_enabled)
+        self.extend_gt_to_next_enabled = bool(enabled)
+        if self.extend_gt_to_next_checkbox is not None:
+            self.extend_gt_to_next_checkbox.value = self.extend_gt_to_next_enabled
+
+        # Sub-toggle is only meaningful when extend is enabled
+        if not self.extend_gt_to_next_enabled:
+            self.extend_prefer_previous_on_overlap_enabled = False
+            if self.extend_prefer_previous_on_overlap_checkbox is not None:
+                self.extend_prefer_previous_on_overlap_checkbox.value = False
+
+        # Enable/disable sub-toggle UI
+        if self.extend_prefer_previous_on_overlap_checkbox is not None:
+            if self.extend_gt_to_next_enabled:
+                self.extend_prefer_previous_on_overlap_checkbox.enable()
+            else:
+                self.extend_prefer_previous_on_overlap_checkbox.disable()
+
+        # If user turns off Extend while staying on a frame that was extended,
+        # restore the original boxes from backup immediately.
+        if was_enabled and (not self.extend_gt_to_next_enabled):
+            try:
+                restored = self._restore_extend_backup_for_current()
+                if restored:
+                    ui.notify('Restored original annotations for this frame', type='info', position='bottom-right', timeout=1500)
+            except Exception as ex:
+                logger.warning(f'Failed to restore extend backup: {ex}')
     
     async def _on_back(self):
         """Handle back button click"""
