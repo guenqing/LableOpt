@@ -566,6 +566,7 @@ def _on_back(self):
 - Auto Save 兼容：当 Extend 在下一帧实际追加了复制框时，会将该帧标记为 `modified`，确保在关闭 `Save Unmodified` 时切图仍会触发自动保存
 
 **Prefer Previous on Overlap（Extend 子开关）**:
+- 快捷键：`u` 切换开/关
 - 仅在 `Extend GT to Next` 开启时可勾选并生效
 - 含义：允许“同类组替代”，并在重叠时优先采纳前一帧（删除后一帧重叠的可编辑框，保留复制框）
 - 同类组替代规则：

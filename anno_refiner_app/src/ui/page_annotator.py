@@ -386,6 +386,7 @@ class AnnotatorPage:
                     with ui.column().classes('gap-1 text-gray-600'):
                         ui.label('[ / ] - Prev/Next image')
                         ui.label('y - Toggle Extend GT to Next')
+                        ui.label('u - Toggle Prefer Previous')
                         ui.label('· - Cycle selection')
                         ui.label('Del/Backspace - Delete box')
                         ui.label('Arrow keys - Move box')
@@ -798,6 +799,27 @@ class AnnotatorPage:
                     position='bottom-right',
                     timeout=1200,
                 )
+                return
+            
+            # u toggles "Prefer Previous on Overlap" (only when Extend is enabled)
+            if str(key_name).lower() == 'u':
+                if self.extend_gt_to_next_enabled:
+                    self.extend_prefer_previous_on_overlap_enabled = not self.extend_prefer_previous_on_overlap_enabled
+                    if self.extend_prefer_previous_on_overlap_checkbox is not None:
+                        self.extend_prefer_previous_on_overlap_checkbox.value = self.extend_prefer_previous_on_overlap_enabled
+                    ui.notify(
+                        f'Prefer Previous on Overlap: {"ON" if self.extend_prefer_previous_on_overlap_enabled else "OFF"}',
+                        type='info',
+                        position='bottom-right',
+                        timeout=1200,
+                    )
+                else:
+                    ui.notify(
+                        'Prefer Previous on Overlap requires Extend GT to Next to be enabled',
+                        type='warning',
+                        position='bottom-right',
+                        timeout=1500,
+                    )
                 return
 
     def _on_extend_gt_to_next_toggle(self, e) -> None:
