@@ -70,6 +70,12 @@ class AnnotatorPage:
         # Box list panel components
         self.box_list_container = None
         
+        # Annotation cleaning properties
+        self.clean_annotations_checkbox = None
+        self.clean_annotations_count = None
+        self.cleared_boxes = []  # Stores boxes that were removed during cleaning
+        self.cleaning_applied = False  # Tracks if cleaning has been applied
+        
         # Keyboard listener reference
         self.page_keyboard = None
     
@@ -335,6 +341,15 @@ class AnnotatorPage:
                     ).classes('w-full text-xs').props('outline dense color=positive').tooltip(
                         '将所有参考框变为可编辑'
                     )
+                    
+                    # Annotation cleaning checkbox
+                    with ui.row().classes('items-center gap-2').tooltip('清理标注：删除重复标注、大框框小框和相似标注'):
+                        self.clean_annotations_checkbox = ui.checkbox(
+                            'Clean Annotations',
+                            value=False,
+                            on_change=self._on_clean_annotations_toggle
+                        ).classes('text-sm')
+                        self.clean_annotations_count = ui.label('0').classes('text-xs text-gray-500')
                 
                 ui.separator()
                 
@@ -345,7 +360,7 @@ class AnnotatorPage:
                         'Extend GT to Next',
                         value=True,
                         on_change=self._on_extend_gt_to_next_toggle,
-                    ).classes('text-sm')
+                    ).classes('text-sm').tooltip('将当前标注延伸到下一帧')
                     self.extend_prefer_previous_on_overlap_checkbox = ui.checkbox(
                         'Prefer Previous on Overlap',
                         value=False,
@@ -359,12 +374,12 @@ class AnnotatorPage:
                         'Auto Save',
                         value=True,
                         on_change=lambda e: setattr(self, 'auto_save_enabled', e.value)
-                    ).classes('text-sm')
+                    ).classes('text-sm').tooltip('自动保存标注')
                     self.save_unmodified_checkbox = ui.checkbox(
                         'Save Unmodified',
                         value=True,
                         on_change=lambda e: setattr(self, 'save_unmodified_enabled', e.value)
-                    ).classes('text-sm')
+                    ).classes('text-sm').tooltip('保存未修改的标注')
                     
                     self.save_button = ui.button(
                         'Save',
@@ -379,7 +394,7 @@ class AnnotatorPage:
                     'Go Back to Analysis',
                     icon='analytics',
                     on_click=self._on_back
-                ).classes('w-full').props('outline')
+                ).classes('w-full').props('outline').tooltip('返回分析页面')
                 
                 # Keyboard shortcuts info
                 with ui.expansion('Keyboard Shortcuts', icon='keyboard').classes('w-full text-xs'):
@@ -475,6 +490,12 @@ class AnnotatorPage:
         
         # Update box list panel
         self._update_box_list()
+        
+        # Reset annotation cleaning state but keep checkbox state
+        if self.clean_annotations_count:
+            self.clean_annotations_count.text = '0'
+        self.cleared_boxes = []
+        self.cleaning_applied = False
 
     def _get_extend_backup_path(self, item: IssueItem) -> Optional[Path]:
         """Compute the backup file path for the current frame (not using *_tmp.txt)."""
@@ -685,6 +706,229 @@ class AnnotatorPage:
             self.annotator.activate_reference()
             self._update_box_list()
             ui.notify('Activated reference boxes', type='positive', position='bottom-right', timeout=1000)
+    
+    def _on_clean_annotations_toggle(self, e):
+        """Handle annotation cleaning checkbox toggle"""
+        if not self.annotator:
+            return
+        
+        if e.value:
+            # Apply cleaning
+            self._clean_annotations()
+        else:
+            # Revert cleaning
+            self._revert_cleaning()
+    
+    def _clean_annotations(self):
+        """Clean annotations by removing duplicate, large containing, and similar boxes"""
+        if not self.annotator:
+            return
+        
+        # Get current boxes
+        gt_boxes = self.annotator.gt_boxes.copy()
+        pred_boxes = self.annotator.pred_boxes.copy()
+        
+        # Store original boxes for revert
+        self.cleared_boxes = {
+            'gt': gt_boxes.copy(),
+            'pred': pred_boxes.copy()
+        }
+        
+        # Process boxes
+        cleaned_gt, cleaned_pred, removed_count = self._process_boxes(gt_boxes, pred_boxes)
+        
+        # Update annotator with cleaned boxes
+        self.annotator.gt_boxes = cleaned_gt
+        self.annotator.pred_boxes = cleaned_pred
+        self.annotator._update_display()
+        
+        # Update box list
+        self._update_box_list()
+        
+        # Update count display
+        if self.clean_annotations_count:
+            self.clean_annotations_count.text = str(removed_count)
+            # Change color to red if there are removed boxes
+            if removed_count > 0:
+                self.clean_annotations_count.classes(remove='text-gray-500')
+                self.clean_annotations_count.classes(add='text-red-500')
+            else:
+                self.clean_annotations_count.classes(remove='text-red-500')
+                self.clean_annotations_count.classes(add='text-gray-500')
+        
+        # Mark cleaning as applied
+        self.cleaning_applied = True
+        
+        # Show notification
+        ui.notify(f'Cleaned annotations: removed {removed_count} boxes', type='info', position='bottom-right', timeout=1500)
+    
+    def _revert_cleaning(self):
+        """Revert annotation cleaning"""
+        if not self.annotator or not self.cleaning_applied:
+            return
+        
+        # Restore original boxes
+        if self.cleared_boxes:
+            self.annotator.gt_boxes = self.cleared_boxes['gt']
+            self.annotator.pred_boxes = self.cleared_boxes['pred']
+            self.annotator._update_display()
+            
+            # Update box list
+            self._update_box_list()
+            
+            # Reset count
+            if self.clean_annotations_count:
+                self.clean_annotations_count.text = '0'
+                # Change color back to gray
+                self.clean_annotations_count.classes(remove='text-red-500')
+                self.clean_annotations_count.classes(add='text-gray-500')
+            
+            # Reset state
+            self.cleaning_applied = False
+            self.cleared_boxes = []
+            
+            # Show notification
+            ui.notify('Reverted annotation cleaning', type='info', position='bottom-right', timeout=1500)
+    
+    def _process_boxes(self, gt_boxes, pred_boxes):
+        """Process boxes to remove duplicate, large containing, and similar boxes"""
+        import copy
+        
+        # Combine all boxes
+        all_boxes = copy.deepcopy(gt_boxes) + copy.deepcopy(pred_boxes)
+        removed_count = 0
+        
+        # Mark boxes to remove
+        to_remove = set()
+        
+        # 1. Remove duplicate boxes (keep larger one)
+        for i in range(len(all_boxes)):
+            if i in to_remove:
+                continue
+            for j in range(i + 1, len(all_boxes)):
+                if j in to_remove:
+                    continue
+                
+                box1 = all_boxes[i]
+                box2 = all_boxes[j]
+                
+                # Calculate IoU
+                iou = self._calculate_iou(
+                    (box1.x, box1.y, box1.x + box1.w, box1.y + box1.h),
+                    (box2.x, box2.y, box2.x + box2.w, box2.y + box2.h)
+                )
+                
+                if iou > 0.7:
+                    # Remove smaller box
+                    area1 = box1.w * box1.h
+                    area2 = box2.w * box2.h
+                    if area1 < area2:
+                        to_remove.add(i)
+                    else:
+                        to_remove.add(j)
+                    removed_count += 1
+        
+        # Filter out duplicate boxes
+        filtered_boxes = [box for i, box in enumerate(all_boxes) if i not in to_remove]
+        
+        # 2. Remove large boxes that contain multiple smaller boxes
+        to_remove_large = set()
+        for i in range(len(filtered_boxes)):
+            if i in to_remove_large:
+                continue
+            
+            large_box = filtered_boxes[i]
+            large_box_coords = (large_box.x, large_box.y, large_box.x + large_box.w, large_box.y + large_box.h)
+            contained_count = 0
+            
+            for j in range(len(filtered_boxes)):
+                if i == j or j in to_remove_large:
+                    continue
+                
+                small_box = filtered_boxes[j]
+                small_box_coords = (small_box.x, small_box.y, small_box.x + small_box.w, small_box.y + small_box.h)
+                
+                if self._is_box_inside(small_box_coords, large_box_coords):
+                    contained_count += 1
+            
+            if contained_count >= 2:
+                to_remove_large.add(i)
+                removed_count += 1
+        
+        # Filter out large boxes
+        filtered_boxes = [box for i, box in enumerate(filtered_boxes) if i not in to_remove_large]
+        
+        # 3. Remove different class boxes with similar positions
+        to_remove_similar = set()
+        for i in range(len(filtered_boxes)):
+            if i in to_remove_similar:
+                continue
+            for j in range(i + 1, len(filtered_boxes)):
+                if j in to_remove_similar:
+                    continue
+                
+                box1 = filtered_boxes[i]
+                box2 = filtered_boxes[j]
+                
+                # Check if different classes
+                if box1.class_id != box2.class_id:
+                    # Calculate IoU
+                    iou = self._calculate_iou(
+                        (box1.x, box1.y, box1.x + box1.w, box1.y + box1.h),
+                        (box2.x, box2.y, box2.x + box2.w, box2.y + box2.h)
+                    )
+                    
+                    # Calculate boundary differences
+                    diffs = [
+                        abs(box1.x - box2.x),
+                        abs(box1.y - box2.y),
+                        abs((box1.x + box1.w) - (box2.x + box2.w)),
+                        abs((box1.y + box1.h) - (box2.y + box2.h))
+                    ]
+                    
+                    # Check if similar
+                    if iou > 0.7 and self._is_boundary_similar(diffs):
+                        to_remove_similar.add(i)
+                        to_remove_similar.add(j)
+                        removed_count += 2
+        
+        # Filter out similar boxes
+        filtered_boxes = [box for i, box in enumerate(filtered_boxes) if i not in to_remove_similar]
+        
+        # Separate back into GT and Pred boxes
+        cleaned_gt = [box for box in filtered_boxes if getattr(box, 'source', '').value == 'gt' or getattr(box, 'source', '') == 'gt']
+        cleaned_pred = [box for box in filtered_boxes if getattr(box, 'source', '').value == 'pred' or getattr(box, 'source', '') == 'pred']
+        
+        return cleaned_gt, cleaned_pred, removed_count
+    
+    def _calculate_iou(self, box1, box2):
+        """Calculate IoU between two boxes"""
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
+        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = area1 + area2 - intersection
+        
+        return intersection / union if union > 0 else 0
+    
+    def _is_box_inside(self, inner_box, outer_box):
+        """Check if inner box is inside outer box"""
+        return (
+            inner_box[0] >= outer_box[0] and
+            inner_box[1] >= outer_box[1] and
+            inner_box[2] <= outer_box[2] and
+            inner_box[3] <= outer_box[3]
+        )
+    
+    def _is_boundary_similar(self, diffs):
+        """Check if boundary differences are similar"""
+        # Check if any 3 sides are within 10 pixels
+        sorted_diffs = sorted(diffs)
+        return sum(1 for d in sorted_diffs[:3] if d <= 10) >= 3
     
     def _on_save(self):
         """Save current annotations

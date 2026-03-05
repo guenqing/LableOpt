@@ -312,6 +312,7 @@ class InteractiveAnnotator:
                 if getattr(box, 'editable', True):
                     self.selected_box_id = box_id
                     self._update_display()
+                    self._notify_change()
                     return True
                 return False
         # Check Pred boxes
@@ -320,6 +321,7 @@ class InteractiveAnnotator:
                 if getattr(box, 'editable', True):
                     self.selected_box_id = box_id
                     self._update_display()
+                    self._notify_change()
                     return True
                 return False
         return False
@@ -937,7 +939,7 @@ class InteractiveAnnotator:
             box: Bounding box to process
             rendered_labels: Dictionary to track all rendered labels
         """
-        source = box.source.value if isinstance(box.source, BoxSource) else box.source
+        source = box.source.value if hasattr(box.source, 'value') else box.source
         
         # Label text
         label = f"{box.class_id}"
@@ -956,6 +958,10 @@ class InteractiveAnnotator:
             base_x = box.x + box.w - bg_width
             base_y = box.y
         
+        # Check if box is selected
+        is_selected = box.id == self.selected_box_id
+        color = self.COLORS[source]['selected' if is_selected else 'normal']
+        
         # Check if we can merge with existing highly overlapping labels (max 4 lines)
         for existing_label in rendered_labels[source]:
             # Calculate overlap area
@@ -970,7 +976,7 @@ class InteractiveAnnotator:
                     # Merge with existing label
                     existing_label['labels'].append(label)
                     existing_label['box_ids'].append(box.id)
-                    existing_label['colors'].append(self.COLORS[source]['normal'])
+                    existing_label['colors'].append(color)
                     
                     # Expand label height for merged content
                     existing_label['height'] += label_height
@@ -984,7 +990,7 @@ class InteractiveAnnotator:
             'height': label_height,
             'box_ids': [box.id],
             'labels': [label],
-            'colors': [self.COLORS[source]['normal']]
+            'colors': [color]
         })
     
     def _render_all_labels(self, rendered_labels: dict, svg_parts: list) -> None:
@@ -1133,11 +1139,10 @@ class InteractiveAnnotator:
         - editable=False: dashed line
         - Color is determined by source (GT=green, Pred=blue)
         """
-        is_selected = box.id == self.selected_box_id
-        source = box.source.value if isinstance(box.source, BoxSource) else box.source
+        source = box.source.value if hasattr(box.source, 'value') else box.source
         
-        color = self.COLORS[source]['selected' if is_selected else 'normal']
-        stroke_width = 3 if is_selected else 2
+        color = self.COLORS[source]['normal']
+        stroke_width = 2
         
         # Editable boxes use solid line, non-editable use dashed line
         editable = getattr(box, 'editable', True)
@@ -1655,6 +1660,7 @@ class InteractiveAnnotator:
         if not editable_boxes:
             self.selected_box_id = None
             self._update_display()
+            self._notify_change()
             return
         
         if not self.selected_box_id:
@@ -1672,6 +1678,7 @@ class InteractiveAnnotator:
             self.selected_box_id = editable_boxes[next_idx].id
         
         self._update_display()
+        self._notify_change()
     
     def _delete_selected(self) -> None:
         """Delete the selected box (must be editable)"""
