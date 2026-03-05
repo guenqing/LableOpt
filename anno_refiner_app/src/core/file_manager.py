@@ -552,8 +552,27 @@ def parse_data_for_dashboard(
     if not labels_mode:
         result["mode"] = "images_full"
         if result["images_exists"]:
-            result["images_count"] = _count_image_files(images_dir)
-            result["pending"] = int(result["images_count"])
+            # If Output Path is set, use the generalized pending estimator so that
+            # Images-only mode still subtracts processed samples (Output/HumanVerified),
+            # aligning with the dashboard's Pending Samples definition.
+            if output_dir is not None:
+                pending_stats = estimate_dashboard_counts_and_pending(
+                    images_path=images_path,
+                    gt_labels_path="",
+                    pred_labels_path="",
+                    output_path=output_path,
+                    human_verified_path=human_verified_path,
+                    known_images_count=None,
+                    include_images_count=True,
+                )
+                result["images_count"] = pending_stats.get("images_count")
+                result["pending"] = pending_stats.get("pending")
+                # Propagate any path-related errors
+                result["errors"].extend(pending_stats.get("errors", []))
+            else:
+                # No Output Path set: fallback to simple image count (no processed subtraction).
+                result["images_count"] = _count_image_files(images_dir)
+                result["pending"] = int(result["images_count"])
         return result
 
     result["mode"] = "labels"
