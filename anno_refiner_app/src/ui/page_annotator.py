@@ -33,7 +33,7 @@ class AnnotatorPage:
         self.auto_save_enabled: bool = True
         self.save_unmodified_enabled: bool = True
         self.auto_focus_enabled: bool = True
-        self.extend_gt_to_next_enabled: bool = True
+        self.extend_gt_to_next_enabled: bool = False
         # Sub-toggle for extend: prefer previous-frame labels on overlap
         self.extend_prefer_previous_on_overlap_enabled: bool = False
         
@@ -75,6 +75,9 @@ class AnnotatorPage:
         self.clean_annotations_count = None
         self.cleared_boxes = []  # Stores boxes that were removed during cleaning
         self.cleaning_applied = False  # Tracks if cleaning has been applied
+        
+        # View state for images without boxes
+        self.previous_view_state = None  # Stores view state from previous image with boxes
         
         # Keyboard listener reference
         self.page_keyboard = None
@@ -243,6 +246,9 @@ class AnnotatorPage:
                         if not is_editable:
                             class_text += ' (ref)'
                         ui.label(class_text).classes('text-xs text-gray-500')
+                        # Add size information
+                        size_text = f'Size: {int(box.w)}×{int(box.h)}'
+                        ui.label(size_text).classes('text-xs text-gray-500')
                     
                     # Eye icon for visibility toggle
                     eye_icon = 'visibility' if is_visible else 'visibility_off'
@@ -349,7 +355,15 @@ class AnnotatorPage:
                             value=False,
                             on_change=self._on_clean_annotations_toggle
                         ).classes('text-sm')
-                        self.clean_annotations_count = ui.label('0').classes('text-xs text-gray-500')
+                    
+                    # Clean Annotations threshold settings
+                    ui.label('Threshold').classes('text-xs text-gray-500')
+                    with ui.row().classes('items-center gap-2'):
+                        self.clean_threshold = ui.radio(
+                            ['Low', 'Medium', 'High'],
+                            value='Medium',
+                            on_change=self._on_clean_threshold_change
+                        ).props('inline').classes('text-xs')
                 
                 ui.separator()
                 
@@ -358,7 +372,7 @@ class AnnotatorPage:
                 with ui.column().classes('gap-2 w-full'):
                     self.extend_gt_to_next_checkbox = ui.checkbox(
                         'Extend GT to Next',
-                        value=True,
+                        value=False,
                         on_change=self._on_extend_gt_to_next_toggle,
                     ).classes('text-sm').tooltip('将当前标注延伸到下一帧')
                     self.extend_prefer_previous_on_overlap_checkbox = ui.checkbox(
@@ -477,13 +491,27 @@ class AnnotatorPage:
         # even when "Save Unmodified" is disabled.
         self.boxes_modified = injected_count > 0
         
+        # Check if current image has any boxes
+        has_boxes = len(gt_boxes) > 0 or len(pred_boxes) > 0
+        
         # Auto-focus on boxes after loading image and boxes
         # auto_focus_boxes() will call on_zoom_change callback to update UI
         if self.annotator.image_width > 0 and self.annotator.image_height > 0:
-            if self.auto_focus_enabled:
-                self.annotator.auto_focus_boxes()
+            if has_boxes:
+                # Auto focus on boxes
+                if self.auto_focus_enabled:
+                    self.annotator.auto_focus_boxes()
+                else:
+                    self.annotator.reset_zoom()
+                # Image has boxes, save the view state after auto focus
+                self.previous_view_state = self.annotator.get_view_state()
             else:
-                self.annotator.reset_zoom()
+                # Image has no boxes, restore previous view state if available
+                if self.previous_view_state:
+                    self.annotator.set_view_state(self.previous_view_state)
+                else:
+                    # No previous view state, reset zoom
+                    self.annotator.reset_zoom()
         
         # Update navigation buttons
         self._update_nav_buttons()
@@ -492,10 +520,12 @@ class AnnotatorPage:
         self._update_box_list()
         
         # Reset annotation cleaning state but keep checkbox state
-        if self.clean_annotations_count:
-            self.clean_annotations_count.text = '0'
         self.cleared_boxes = []
         self.cleaning_applied = False
+        
+        # If Clean Annotations is checked, re-apply cleaning
+        if self.clean_annotations_checkbox and self.clean_annotations_checkbox.value:
+            self._clean_annotations()
 
     def _get_extend_backup_path(self, item: IssueItem) -> Optional[Path]:
         """Compute the backup file path for the current frame (not using *_tmp.txt)."""
@@ -719,6 +749,12 @@ class AnnotatorPage:
             # Revert cleaning
             self._revert_cleaning()
     
+    def _on_clean_threshold_change(self, e):
+        """Handle clean threshold change"""
+        if self.clean_annotations_checkbox and self.clean_annotations_checkbox.value:
+            # Re-apply cleaning with new threshold
+            self._clean_annotations()
+    
     def _clean_annotations(self):
         """Clean annotations by removing duplicate, large containing, and similar boxes"""
         if not self.annotator:
@@ -728,14 +764,11 @@ class AnnotatorPage:
         gt_boxes = self.annotator.gt_boxes.copy()
         pred_boxes = self.annotator.pred_boxes.copy()
         
-        # Store original boxes for revert
-        self.cleared_boxes = {
-            'gt': gt_boxes.copy(),
-            'pred': pred_boxes.copy()
-        }
+        # Process boxes and get removed box IDs
+        cleaned_gt, cleaned_pred, removed_box_ids = self._process_boxes(gt_boxes, pred_boxes)
         
-        # Process boxes
-        cleaned_gt, cleaned_pred, removed_count = self._process_boxes(gt_boxes, pred_boxes)
+        # Store removed box IDs for revert
+        self.cleared_boxes = removed_box_ids
         
         # Update annotator with cleaned boxes
         self.annotator.gt_boxes = cleaned_gt
@@ -745,16 +778,14 @@ class AnnotatorPage:
         # Update box list
         self._update_box_list()
         
-        # Update count display
-        if self.clean_annotations_count:
-            self.clean_annotations_count.text = str(removed_count)
-            # Change color to red if there are removed boxes
+        # Update clean status label on image
+        removed_count = len(removed_box_ids)
+        if hasattr(self.annotator, 'clean_status_label') and self.annotator.clean_status_label:
             if removed_count > 0:
-                self.clean_annotations_count.classes(remove='text-gray-500')
-                self.clean_annotations_count.classes(add='text-red-500')
+                self.annotator.clean_status_label.text = f'Clean Annotations：{removed_count}'
+                self.annotator.clean_status_label.style('display: block;')
             else:
-                self.clean_annotations_count.classes(remove='text-red-500')
-                self.clean_annotations_count.classes(add='text-gray-500')
+                self.annotator.clean_status_label.style('display: none;')
         
         # Mark cleaning as applied
         self.cleaning_applied = True
@@ -763,25 +794,34 @@ class AnnotatorPage:
         ui.notify(f'Cleaned annotations: removed {removed_count} boxes', type='info', position='bottom-right', timeout=1500)
     
     def _revert_cleaning(self):
-        """Revert annotation cleaning"""
+        """Revert annotation cleaning - only restore removed boxes"""
         if not self.annotator or not self.cleaning_applied:
             return
         
-        # Restore original boxes
+        # Restore only the removed boxes
         if self.cleared_boxes:
-            self.annotator.gt_boxes = self.cleared_boxes['gt']
-            self.annotator.pred_boxes = self.cleared_boxes['pred']
+            # Get current boxes
+            current_gt = self.annotator.gt_boxes
+            current_pred = self.annotator.pred_boxes
+            
+            # Add back removed boxes
+            for box in self.cleared_boxes:
+                if box.source.value == 'gt':
+                    current_gt.append(box)
+                else:
+                    current_pred.append(box)
+            
+            # Update annotator
+            self.annotator.gt_boxes = current_gt
+            self.annotator.pred_boxes = current_pred
             self.annotator._update_display()
             
             # Update box list
             self._update_box_list()
             
-            # Reset count
-            if self.clean_annotations_count:
-                self.clean_annotations_count.text = '0'
-                # Change color back to gray
-                self.clean_annotations_count.classes(remove='text-red-500')
-                self.clean_annotations_count.classes(add='text-gray-500')
+            # Hide clean status label
+            if hasattr(self.annotator, 'clean_status_label') and self.annotator.clean_status_label:
+                self.annotator.clean_status_label.style('display: none;')
             
             # Reset state
             self.cleaning_applied = False
@@ -794,9 +834,24 @@ class AnnotatorPage:
         """Process boxes to remove duplicate, large containing, and similar boxes"""
         import copy
         
+        # Get threshold setting
+        threshold = getattr(self, 'clean_threshold', None)
+        threshold_value = threshold.value if threshold else 'Medium'
+        
+        # Set thresholds based on selected level
+        if threshold_value == 'Low':
+            duplicate_iou_threshold = 0.6
+            similar_iou_threshold = 0.5
+        elif threshold_value == 'High':
+            duplicate_iou_threshold = 0.8
+            similar_iou_threshold = 0.7
+        else:  # Medium
+            duplicate_iou_threshold = 0.7
+            similar_iou_threshold = 0.6
+        
         # Combine all boxes
         all_boxes = copy.deepcopy(gt_boxes) + copy.deepcopy(pred_boxes)
-        removed_count = 0
+        removed_boxes = []  # Store removed boxes for revert
         
         # Mark boxes to remove
         to_remove = set()
@@ -818,20 +873,21 @@ class AnnotatorPage:
                     (box2.x, box2.y, box2.x + box2.w, box2.y + box2.h)
                 )
                 
-                if iou > 0.7:
+                if iou > duplicate_iou_threshold:
                     # Remove smaller box
                     area1 = box1.w * box1.h
                     area2 = box2.w * box2.h
                     if area1 < area2:
                         to_remove.add(i)
+                        removed_boxes.append(box1)
                     else:
                         to_remove.add(j)
-                    removed_count += 1
+                        removed_boxes.append(box2)
         
         # Filter out duplicate boxes
         filtered_boxes = [box for i, box in enumerate(all_boxes) if i not in to_remove]
         
-        # 2. Remove large boxes that contain multiple smaller boxes
+        # 2. Remove large boxes that contain at least one smaller box
         to_remove_large = set()
         for i in range(len(filtered_boxes)):
             if i in to_remove_large:
@@ -839,7 +895,6 @@ class AnnotatorPage:
             
             large_box = filtered_boxes[i]
             large_box_coords = (large_box.x, large_box.y, large_box.x + large_box.w, large_box.y + large_box.h)
-            contained_count = 0
             
             for j in range(len(filtered_boxes)):
                 if i == j or j in to_remove_large:
@@ -849,11 +904,9 @@ class AnnotatorPage:
                 small_box_coords = (small_box.x, small_box.y, small_box.x + small_box.w, small_box.y + small_box.h)
                 
                 if self._is_box_inside(small_box_coords, large_box_coords):
-                    contained_count += 1
-            
-            if contained_count >= 2:
-                to_remove_large.add(i)
-                removed_count += 1
+                    to_remove_large.add(i)
+                    removed_boxes.append(large_box)
+                    break
         
         # Filter out large boxes
         filtered_boxes = [box for i, box in enumerate(filtered_boxes) if i not in to_remove_large]
@@ -887,10 +940,11 @@ class AnnotatorPage:
                     ]
                     
                     # Check if similar
-                    if iou > 0.7 and self._is_boundary_similar(diffs):
+                    if iou > similar_iou_threshold and self._is_boundary_similar(diffs):
                         to_remove_similar.add(i)
                         to_remove_similar.add(j)
-                        removed_count += 2
+                        removed_boxes.append(box1)
+                        removed_boxes.append(box2)
         
         # Filter out similar boxes
         filtered_boxes = [box for i, box in enumerate(filtered_boxes) if i not in to_remove_similar]
@@ -899,7 +953,7 @@ class AnnotatorPage:
         cleaned_gt = [box for box in filtered_boxes if getattr(box, 'source', '').value == 'gt' or getattr(box, 'source', '') == 'gt']
         cleaned_pred = [box for box in filtered_boxes if getattr(box, 'source', '').value == 'pred' or getattr(box, 'source', '') == 'pred']
         
-        return cleaned_gt, cleaned_pred, removed_count
+        return cleaned_gt, cleaned_pred, removed_boxes
     
     def _calculate_iou(self, box1, box2):
         """Calculate IoU between two boxes"""

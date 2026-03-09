@@ -133,6 +133,11 @@ class InteractiveAnnotator:
                                 cross=False,
                                 sanitize=False,
                             ).classes('block')
+                        
+                        # Clean Annotations status label (positioned at top-left of image)
+                        self.clean_status_label = ui.label('').classes('absolute text-sm font-bold').style(
+                            'top: 10px; left: 10px; background-color: rgba(0,0,0,0.5); color: red; padding: 4px 8px; border-radius: 4px; display: none;'
+                        )
                     
                     # Vertical scrollbar on right
                     self.v_scrollbar = ui.slider(
@@ -564,6 +569,30 @@ class InteractiveAnnotator:
         if self.on_zoom_change:
             self.on_zoom_change(self.zoom)
     
+    def get_view_state(self) -> dict:
+        """Get current view state (zoom and pan)"""
+        return {
+            'zoom': self.zoom,
+            'pan_x': self.pan_x,
+            'pan_y': self.pan_y
+        }
+    
+    def set_view_state(self, view_state: dict) -> None:
+        """Set view state (zoom and pan)"""
+        if 'zoom' in view_state:
+            self.zoom = view_state['zoom']
+        if 'pan_x' in view_state:
+            self.pan_x = view_state['pan_x']
+        if 'pan_y' in view_state:
+            self.pan_y = view_state['pan_y']
+        
+        # Apply transform and update scrollbars
+        self._apply_transform()
+        self._update_scrollbars()
+        
+        if self.on_zoom_change:
+            self.on_zoom_change(self.zoom)
+    
     def zoom_in(self) -> None:
         """Zoom in by small step"""
         self.set_zoom(self.zoom + self.ZOOM_STEP)
@@ -933,7 +962,7 @@ class InteractiveAnnotator:
         self.image_component.set_content(''.join(svg_parts))
     
     def _collect_label_info(self, box: BBox, rendered_labels: dict) -> None:
-        """Collect label information and handle merging for highly overlapping labels
+        """Collect label information
         
         Args:
             box: Bounding box to process
@@ -948,44 +977,43 @@ class InteractiveAnnotator:
         bg_width = 20 if box.class_id < 10 else 28
         label_height = 18
         
-        # Determine base label position based on source
-        if source == 'gt':
-            # GT labels on top-left
-            base_x = box.x
-            base_y = box.y
-        else:  # pred
-            # Pred labels on top-right
-            base_x = box.x + box.w - bg_width
-            base_y = box.y
-        
         # Check if box is selected
         is_selected = box.id == self.selected_box_id
         color = self.COLORS[source]['selected' if is_selected else 'normal']
         
-        # Check if we can merge with existing highly overlapping labels (max 4 lines)
-        for existing_label in rendered_labels[source]:
-            # Calculate overlap area
-            overlap_x1 = max(base_x, existing_label['x'])
-            overlap_y1 = max(base_y - label_height, existing_label['y'])
-            overlap_x2 = min(base_x + bg_width, existing_label['x'] + existing_label['width'])
-            overlap_y2 = min(base_y, existing_label['y'] + existing_label['height'])
-            
-            if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
-                # High overlap detected, check if we can merge (max 4 lines)
-                if len(existing_label['labels']) < 4:
-                    # Merge with existing label
-                    existing_label['labels'].append(label)
-                    existing_label['box_ids'].append(box.id)
-                    existing_label['colors'].append(color)
-                    
-                    # Expand label height for merged content
-                    existing_label['height'] += label_height
-                    return
+        # Calculate possible label positions around the box
+        # Order: top-left, top-right, bottom-left, bottom-right
+        possible_positions = [
+            # Top-left
+            {'x': box.x, 'y': box.y - label_height},
+            # Top-right
+            {'x': box.x + box.w - bg_width, 'y': box.y - label_height},
+            # Bottom-left
+            {'x': box.x, 'y': box.y + box.h},
+            # Bottom-right
+            {'x': box.x + box.w - bg_width, 'y': box.y + box.h}
+        ]
         
-        # No merging, track as new label
+        # Filter positions to ensure they stay within image boundaries
+        valid_positions = []
+        for pos in possible_positions:
+            if (pos['x'] >= 0 and 
+                pos['y'] >= 0 and 
+                pos['x'] + bg_width <= self.image_width and 
+                pos['y'] + label_height <= self.image_height):
+                valid_positions.append(pos)
+        
+        # Use the first valid position if available
+        if valid_positions:
+            base_pos = valid_positions[0]
+        else:
+            # Fallback to top-left if no valid positions
+            base_pos = {'x': box.x, 'y': box.y - label_height}
+        
+        # No merging, always track as new label
         rendered_labels[source].append({
-            'x': base_x,
-            'y': base_y - label_height,
+            'x': base_pos['x'],
+            'y': base_pos['y'],
             'width': bg_width,
             'height': label_height,
             'box_ids': [box.id],
@@ -1051,38 +1079,63 @@ class InteractiveAnnotator:
         Returns:
             (x, y) - Position coordinates for the new label
         """
-        x = new_label['x']
-        y = new_label['y']
         width = new_label['width']
         height = new_label['height']
         
-        offset = 0
-        max_offset = 10  # Limit offset to prevent labels from going too far
+        # Get the box ID to find its coordinates
+        box_id = new_label['box_ids'][0]
+        # Find the corresponding box
+        box = None
+        for b in self.gt_boxes + self.pred_boxes:
+            if b.id == box_id:
+                box = b
+                break
         
-        while offset < max_offset:
-            current_y = y - (offset * 18)  # 18 is label height
-            current_x = x
-            
-            # Check if this position overlaps with any existing label
-            overlap_found = False
-            for existing_label in positioned_labels:
-                # Calculate overlap
-                overlap_x1 = max(current_x, existing_label['x'])
-                overlap_y1 = max(current_y, existing_label['y'])
-                overlap_x2 = min(current_x + width, existing_label['x'] + existing_label['width'])
-                overlap_y2 = min(current_y + height, existing_label['y'] + existing_label['height'])
+        if not box:
+            # Fallback to original position if box not found
+            return (new_label['x'], new_label['y'])
+        
+        # Calculate all possible positions around the box
+        possible_positions = [
+            # Top-left
+            (box.x, box.y - height),
+            # Top-right
+            (box.x + box.w - width, box.y - height),
+            # Bottom-left
+            (box.x, box.y + box.h),
+            # Bottom-right
+            (box.x + box.w - width, box.y + box.h),
+            # Left-center
+            (box.x - width, box.y + (box.h - height) / 2),
+            # Right-center
+            (box.x + box.w, box.y + (box.h - height) / 2)
+        ]
+        
+        # Check each position for overlap and boundaries
+        for pos_x, pos_y in possible_positions:
+            # Check if position is within image boundaries
+            if (pos_x >= 0 and 
+                pos_y >= 0 and 
+                pos_x + width <= self.image_width and 
+                pos_y + height <= self.image_height):
                 
-                if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
-                    overlap_found = True
-                    break
-            
-            if not overlap_found:
-                return (current_x, current_y)
-            
-            offset += 1
+                # Check if position overlaps with any existing label
+                overlap_found = False
+                for existing_label in positioned_labels:
+                    overlap_x1 = max(pos_x, existing_label['x'])
+                    overlap_y1 = max(pos_y, existing_label['y'])
+                    overlap_x2 = min(pos_x + width, existing_label['x'] + existing_label['width'])
+                    overlap_y2 = min(pos_y + height, existing_label['y'] + existing_label['height'])
+                    
+                    if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+                        overlap_found = True
+                        break
+                
+                if not overlap_found:
+                    return (pos_x, pos_y)
         
-        # If no good position found, just use the base position
-        return (x, y)
+        # If no good position found, use the original position
+        return (new_label['x'], new_label['y'])
     
     def _render_box(self, box: BBox) -> str:
         """Render a single bounding box as SVG
@@ -1161,7 +1214,8 @@ class InteractiveAnnotator:
     def _render_handles(self, box: BBox) -> str:
         """Render resize handles for selected box"""
         x, y, w, h = box.x, box.y, box.w, box.h
-        hs = self.HANDLE_SIZE
+        # Use smaller handle size for better visibility
+        handle_size = 1.8
         
         positions = {
             'nw': (x, y),
@@ -1184,9 +1238,9 @@ class InteractiveAnnotator:
         svg_parts = []
         for pos_name, (cx, cy) in positions.items():
             svg_parts.append(
-                f'<rect x="{cx - hs/2}" y="{cy - hs/2}" '
-                f'width="{hs}" height="{hs}" '
-                f'fill="white" stroke="#ef4444" stroke-width="1" '
+                f'<rect x="{cx - handle_size/2}" y="{cy - handle_size/2}" '
+                f'width="{handle_size}" height="{handle_size}" '
+                f'fill="#ef4444" stroke="#ef4444" stroke-width="1" '
                 f'data-handle="{pos_name}" style="cursor: {cursors[pos_name]}"/>'
             )
         
@@ -1459,6 +1513,7 @@ class InteractiveAnnotator:
         """Determine what was clicked: ('handle', name), ('box', BBox), or ('empty', None)
         
         Only returns editable boxes for selection.
+        When multiple boxes contain the click point, selects the smallest box (most precise).
         """
         # Check handles first (if a box is selected)
         selected_box = self.get_selected_box()
@@ -1467,20 +1522,29 @@ class InteractiveAnnotator:
             if handle:
                 return ('handle', handle)
         
-        # Check GT boxes (reverse order for top-most first)
-        # Only return editable and visible boxes
-        for box in reversed(self.gt_boxes):
+        # Collect all boxes that contain the click point
+        # Check GT boxes first, then Pred boxes
+        candidate_boxes = []
+        
+        for box in self.gt_boxes:
             if getattr(box, 'visible', True) and getattr(box, 'editable', True):
                 if self._point_in_box(x, y, box):
-                    return ('box', box)
+                    candidate_boxes.append(box)
         
-        # Check Pred boxes (only if editable)
-        for box in reversed(self.pred_boxes):
+        for box in self.pred_boxes:
             if getattr(box, 'visible', True) and getattr(box, 'editable', True):
                 if self._point_in_box(x, y, box):
-                    return ('box', box)
+                    candidate_boxes.append(box)
         
-        return ('empty', None)
+        # If no boxes contain the click point, return empty
+        if not candidate_boxes:
+            return ('empty', None)
+        
+        # Select the smallest box (by area) - most precise annotation
+        # This ensures nested boxes are handled correctly
+        smallest_box = min(candidate_boxes, key=lambda b: b.w * b.h)
+        
+        return ('box', smallest_box)
     
     def _get_handle_at(self, x: float, y: float, box: BBox) -> Optional[str]:
         """Check if point is on a handle, return handle name or None"""
