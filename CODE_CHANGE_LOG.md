@@ -25,3 +25,13 @@ Used to record every code change made in this repository.
 - Summary: Started XML annotation support on branch `codex/feature-xml-annotations` and added end-to-end `.xml` handling across analysis, dashboard visualization, annotator loading, and output saving.
 - Files: `anno_refiner_app/src/core/label_utils.py`, `anno_refiner_app/src/core/analyzer.py`, `anno_refiner_app/src/core/file_manager.py`, `anno_refiner_app/src/ui/page_annotator.py`, `anno_refiner_app/src/ui/page_dashboard.py`, `CODE_CHANGE_LOG.md`
 - Notes: Added Pascal VOC XML read/write support, generic label key/path resolution for `.txt/.xml`, XML-aware pending/statistics logic, and class-name mapping support for analysis and UI. Verified with `py_compile` and a local XML read/write smoke test.
+
+### 2026-03-12 16:45
+- Summary: Updated the main usage documentation to cover XML support, mixed label formats, classes mapping requirements, output behavior, and current XML limitations.
+- Files: `README.md`, `CODE_CHANGE_LOG.md`
+- Notes: Replaced outdated YOLO-only guidance with current project behavior and added practical setup instructions for Pascal VOC XML workflows.
+
+### 2026-03-12 16:49
+- Summary: Expanded the README shortcut and box-operation documentation to match current annotator behavior.
+- Files: `README.md`, `CODE_CHANGE_LOG.md`
+- Notes: Added navigation, frame-to-frame assist toggles, box edge/corner adjustment shortcuts, mouse editing behavior, auto-save notes, and clearer editable/reference box rules.
