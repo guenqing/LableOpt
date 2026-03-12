@@ -437,18 +437,22 @@ class InteractiveAnnotator:
             self.h_scrollbar.set_visibility(False)
             self.v_scrollbar.set_visibility(False)
         else:
-            self.h_scrollbar.set_visibility(True)
-            self.v_scrollbar.set_visibility(True)
-            
             max_pan_x, max_pan_y = self._get_max_pan()
+
+            self.h_scrollbar.set_visibility(max_pan_x > 0)
+            self.v_scrollbar.set_visibility(max_pan_y > 0)
             
             if max_pan_x > 0:
                 h_value = (self.pan_x / max_pan_x) * 100
                 self.h_scrollbar.set_value(h_value)
+            else:
+                self.h_scrollbar.set_value(0)
             
             if max_pan_y > 0:
                 v_value = (self.pan_y / max_pan_y) * 100
                 self.v_scrollbar.set_value(v_value)
+            else:
+                self.v_scrollbar.set_value(0)
     
     def set_zoom(self, zoom: float, focus_point: tuple = None) -> None:
         """Set zoom level (1.0 = 100%)
@@ -580,12 +584,14 @@ class InteractiveAnnotator:
     def set_view_state(self, view_state: dict) -> None:
         """Set view state (zoom and pan)"""
         if 'zoom' in view_state:
-            self.zoom = view_state['zoom']
+            self.zoom = max(1.0, min(float(view_state['zoom']), 20.0))
         if 'pan_x' in view_state:
-            self.pan_x = view_state['pan_x']
+            self.pan_x = float(view_state['pan_x'])
         if 'pan_y' in view_state:
-            self.pan_y = view_state['pan_y']
-        
+            self.pan_y = float(view_state['pan_y'])
+
+        self._constrain_pan()
+
         # Apply transform and update scrollbars
         self._apply_transform()
         self._update_scrollbars()
@@ -722,17 +728,17 @@ class InteractiveAnnotator:
             transform = f'translate({display_x_1x}px, {display_y_1x}px) scale({scale_1x})'
             self.transform_container.style(f'transform: {transform}; transform-origin: 0 0;')
         else:
-            # At zoom > 1x, scale by zoom and translate to show the panned region
-            # CSS applies transforms right-to-left, so we write: translate then scale
-            # This means: first scale, then translate
-            # We want: point (pan_x, pan_y) in image coordinates to be at the top-left of the visible area
-            # In 1x display space: (pan_x*scale_1x, pan_y*scale_1x)
-            # After zoom scale: (pan_x*scale_1x*zoom, pan_y*scale_1x*zoom)
-            # We want this point to be at viewer top-left (accounting for 1x offset): (display_x_1x, display_y_1x)
-            # So translate by: (display_x_1x - pan_x*scale_1x*zoom, display_y_1x - pan_y*scale_1x*zoom)
-            translate_x = display_x_1x - self.pan_x * scale_1x * self.zoom
-            translate_y = display_y_1x - self.pan_y * scale_1x * self.zoom
-            
+            scaled_width = self.image_width * scale_1x * self.zoom
+            scaled_height = self.image_height * scale_1x * self.zoom
+
+            # Keep content centered on any axis where the zoomed image is still
+            # smaller than the viewport; otherwise pan from the top-left edge.
+            base_translate_x = max(0.0, (self.view_width - scaled_width) / 2)
+            base_translate_y = max(0.0, (self.view_height - scaled_height) / 2)
+
+            translate_x = base_translate_x - (self.pan_x * scale_1x * self.zoom)
+            translate_y = base_translate_y - (self.pan_y * scale_1x * self.zoom)
+
             transform = f'translate({translate_x}px, {translate_y}px) scale({self.zoom * scale_1x})'
             self.transform_container.style(f'transform: {transform}; transform-origin: 0 0;')
         
@@ -851,7 +857,7 @@ class InteractiveAnnotator:
         self._update_scrollbars()
     
     def _constrain_pan(self) -> None:
-        """Constrain pan to keep image mostly visible, allowing some boundary overscroll for better box visibility"""
+        """Constrain pan to strict image boundaries."""
         if self.zoom <= 1.0:
             self.pan_x = 0
             self.pan_y = 0
@@ -863,13 +869,11 @@ class InteractiveAnnotator:
         scale_1x = self._get_viewer_scale_1x()
         visible_width = self.view_width / (self.zoom * scale_1x)
         visible_height = self.view_height / (self.zoom * scale_1x)
-        
-        # Allow some overscroll beyond image boundaries (10% of visible area)
-        overscroll = 0.1
-        min_pan_x = -visible_width * overscroll
-        min_pan_y = -visible_height * overscroll
-        max_pan_x = max(0, self.image_width - visible_width + visible_width * overscroll)
-        max_pan_y = max(0, self.image_height - visible_height + visible_height * overscroll)
+
+        min_pan_x = 0.0
+        min_pan_y = 0.0
+        max_pan_x = max(0.0, self.image_width - visible_width)
+        max_pan_y = max(0.0, self.image_height - visible_height)
         
         self.pan_x = max(min_pan_x, min(self.pan_x, max_pan_x))
         self.pan_y = max(min_pan_y, min(self.pan_y, max_pan_y))
@@ -1191,10 +1195,13 @@ class InteractiveAnnotator:
         - editable=True: solid line
         - editable=False: dashed line
         - Color is determined by source (GT=green, Pred=blue)
+        - Selected boxes are red
         """
         source = box.source.value if hasattr(box.source, 'value') else box.source
         
-        color = self.COLORS[source]['normal']
+        # Check if box is selected
+        is_selected = box.id == self.selected_box_id
+        color = self.COLORS[source]['selected'] if is_selected else self.COLORS[source]['normal']
         stroke_width = 2
         
         # Editable boxes use solid line, non-editable use dashed line
@@ -1880,3 +1887,7 @@ class InteractiveAnnotator:
         self._save_history()
         self._notify_change()
         self._update_display()
+
+
+
+

@@ -7,11 +7,14 @@ import time
 # cleanlab imports are moved inside analyze method to avoid DLL loading issues
 
 from ..models import IssueItem, IssueType
-from .yolo_utils import (
-    collect_image_paths,
+from .label_utils import (
+    build_class_name_to_id,
+    collect_label_keys,
+    find_image_rel_path_for_key,
     prepare_cleanlab_labels,
     prepare_cleanlab_predictions,
-    count_classes
+    count_classes,
+    resolve_label_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,7 +30,8 @@ class CleanlabAnalyzer:
         gt_labels_path: str,
         output_path: str = "",
         human_verified_path: str = "",
-        progress_callback: Optional[Callable[[str, float], None]] = None
+        progress_callback: Optional[Callable[[str, float], None]] = None,
+        class_mapping: Optional[Any] = None,
     ):
         self.images_path = Path(images_path)
         self.pred_labels_path = Path(pred_labels_path)
@@ -35,6 +39,7 @@ class CleanlabAnalyzer:
         self.output_path = output_path
         self.human_verified_path = human_verified_path
         self.progress_callback = progress_callback or (lambda msg, pct: None)
+        self.class_name_to_id = build_class_name_to_id(class_mapping)
 
         self.labels: List[Dict[str, Any]] = []        # cleanlab format GT
         self.predictions: List[np.ndarray] = []       # cleanlab format predictions
@@ -60,15 +65,11 @@ class CleanlabAnalyzer:
         #   (3) Existing image files (any supported extension)
         # Then we exclude samples already present in Output/HumanVerified paths.
         from .file_manager import should_skip_sample
-        from .yolo_utils import find_image_rel_path_for_key
 
-        gt_label_files = [
-            p for p in self.gt_labels_path.rglob('*.txt')
-            if p.is_file() and not p.name.endswith('_tmp.txt')
-        ]
-        total_gt = len(gt_label_files)
+        gt_keys = sorted(collect_label_keys(self.gt_labels_path, exclude_tmp=True))
+        total_gt = len(gt_keys)
         if total_gt == 0:
-            raise ValueError(f"No GT label files found in {self.gt_labels_path} (excluding *_tmp.txt)")
+            raise ValueError(f"No GT label files found in {self.gt_labels_path} (excluding tmp labels)")
 
         filtered_paths: List[Path] = []
         skipped_count = 0
@@ -77,11 +78,9 @@ class CleanlabAnalyzer:
 
         # throttle progress reports (avoid log spam)
         last_report_ts = 0.0
-        for i, gt_file in enumerate(gt_label_files, start=1):
-            key = gt_file.relative_to(self.gt_labels_path).with_suffix('')  # e.g. a/b/x
-
-            pred_label_path = self.pred_labels_path / key.with_suffix('.txt')
-            if not pred_label_path.exists():
+        for i, key in enumerate(gt_keys, start=1):
+            pred_label_path = resolve_label_path(self.pred_labels_path, key)
+            if pred_label_path is None:
                 missing_pred_count += 1
             else:
                 img_rel_path = find_image_rel_path_for_key(self.images_path, key)
@@ -95,7 +94,6 @@ class CleanlabAnalyzer:
             now = time.time()
             if (now - last_report_ts) >= 1.0 or i == total_gt:
                 last_report_ts = now
-                # map loop progress into 5% -> 10%
                 pct = 0.05 + (i / total_gt) * 0.05
                 self._report_progress(f"Collecting analysis samples... {i}/{total_gt}", pct)
 
@@ -115,7 +113,8 @@ class CleanlabAnalyzer:
         self.labels, self.image_paths = prepare_cleanlab_labels(
             self.images_path,
             self.gt_labels_path,
-            filtered_paths
+            filtered_paths,
+            class_name_to_id=self.class_name_to_id,
         )
         step_time = time.time() - step_start
         logger.info(f"Prepared {len(self.labels)} valid samples (耗时: {step_time:.3f}s)")
@@ -127,7 +126,8 @@ class CleanlabAnalyzer:
         self.num_classes = count_classes(
             self.gt_labels_path,
             self.pred_labels_path,
-            self.image_paths
+            self.image_paths,
+            class_name_to_id=self.class_name_to_id,
         )
         step_time = time.time() - step_start
         logger.info(f"Detected {self.num_classes} classes (耗时: {step_time:.3f}s)")
@@ -140,7 +140,8 @@ class CleanlabAnalyzer:
             self.images_path,
             self.pred_labels_path,
             self.image_paths,
-            self.num_classes
+            self.num_classes,
+            class_name_to_id=self.class_name_to_id,
         )
         step_time = time.time() - step_start
         logger.info(f"Pred labels conversion complete (耗时: {step_time:.3f}s)")
@@ -307,3 +308,4 @@ class CleanlabAnalyzer:
             predictions=self.predictions,
             verbose=False
         )
+

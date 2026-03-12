@@ -10,7 +10,13 @@ from nicegui import ui
 
 from ..state import app_state
 from ..models import BBox, BoxSource, IssueItem, IssueType
-from ..core.yolo_utils import read_yolo_label, get_image_size
+from ..core.label_utils import (
+    build_class_id_to_name,
+    build_class_name_to_id,
+    get_image_size,
+    read_label_file,
+    resolve_label_path,
+)
 from ..core.extend_gt_utils import (
     editable_boxes_to_yolo,
     apply_extend_gt_to_next,
@@ -506,11 +512,11 @@ class AnnotatorPage:
                 # Image has boxes, save the view state after auto focus
                 self.previous_view_state = self.annotator.get_view_state()
             else:
-                # Image has no boxes, restore previous view state if available
-                if self.previous_view_state:
+                # Image has no boxes: do not inherit high-zoom state from previous image.
+                # This prevents empty-edge regions (corners/sides) from being centered after restore.
+                if self.previous_view_state and float(self.previous_view_state.get('zoom', 1.0)) <= 1.0:
                     self.annotator.set_view_state(self.previous_view_state)
                 else:
-                    # No previous view state, reset zoom
                     self.annotator.reset_zoom()
         
         # Update navigation buttons
@@ -600,31 +606,33 @@ class AnnotatorPage:
         img_path = Path(app_state.config.images_path) / rel_path
         img_w, img_h = get_image_size(img_path)
         
-        # GT labels - load from Output Path (check for tmp file first, then .txt, fallback to GT Labels Path if set)
+        class_name_to_id = build_class_name_to_id(app_state.class_mapping)
+
+        # GT labels - prefer output tmp/finalized labels, then fall back to source labels.
         output_path = Path(app_state.config.output_path) if (app_state.config.output_path or '').strip() else None
-        output_label_path = (output_path / rel_path.with_suffix('.txt')) if output_path else None
-        output_tmp_path = (output_path / rel_path.parent / f'{rel_path.stem}_tmp.txt') if output_path else None
-        
+        key = rel_path.with_suffix('')
+
         gt_raw = []
-        if output_tmp_path and output_tmp_path.exists():
-            # Load from tmp file in output path
-            gt_raw = read_yolo_label(output_tmp_path, img_w, img_h, has_confidence=False)
-        elif output_label_path and output_label_path.exists():
-            # Load from .txt file in output path
-            gt_raw = read_yolo_label(output_label_path, img_w, img_h, has_confidence=False)
-        else:
-            # Fallback to original GT labels path (only if configured)
+        if output_path:
+            output_tmp_path = resolve_label_path(output_path, key, include_tmp=True)
+            output_label_path = resolve_label_path(output_path, key)
+            if output_tmp_path and output_tmp_path.exists():
+                gt_raw = read_label_file(output_tmp_path, img_w, img_h, has_confidence=False, class_name_to_id=class_name_to_id)
+            elif output_label_path and output_label_path.exists():
+                gt_raw = read_label_file(output_label_path, img_w, img_h, has_confidence=False, class_name_to_id=class_name_to_id)
+
+        if not gt_raw:
             gt_labels_root = (app_state.config.gt_labels_path or '').strip()
             if gt_labels_root and Path(gt_labels_root).exists():
-                gt_label_path = Path(gt_labels_root) / rel_path.with_suffix('.txt')
-                gt_raw = read_yolo_label(gt_label_path, img_w, img_h, has_confidence=False)
+                gt_label_path = resolve_label_path(Path(gt_labels_root), key)
+                gt_raw = read_label_file(gt_label_path, img_w, img_h, has_confidence=False, class_name_to_id=class_name_to_id)
         
         # Pred labels (only if configured)
         pred_raw = []
         pred_labels_root = (app_state.config.pred_labels_path or '').strip()
         if pred_labels_root and Path(pred_labels_root).exists():
-            pred_label_path = Path(pred_labels_root) / rel_path.with_suffix('.txt')
-            pred_raw = read_yolo_label(pred_label_path, img_w, img_h, has_confidence=True)
+            pred_label_path = resolve_label_path(Path(pred_labels_root), key)
+            pred_raw = read_label_file(pred_label_path, img_w, img_h, has_confidence=True, class_name_to_id=class_name_to_id)
         
         # Convert to BBox objects
         # GT boxes: editable=True (can be edited)
@@ -840,14 +848,20 @@ class AnnotatorPage:
         
         # Set thresholds based on selected level
         if threshold_value == 'Low':
-            duplicate_iou_threshold = 0.6
-            similar_iou_threshold = 0.5
+            duplicate_iou_threshold = 0.85
+            similar_iou_threshold = 0.85
+            boundary_threshold = 10
+            min_contained_boxes = 2
         elif threshold_value == 'High':
-            duplicate_iou_threshold = 0.8
-            similar_iou_threshold = 0.7
+            duplicate_iou_threshold = 0.45
+            similar_iou_threshold = 0.45
+            boundary_threshold = 50
+            min_contained_boxes = 1
         else:  # Medium
             duplicate_iou_threshold = 0.7
-            similar_iou_threshold = 0.6
+            similar_iou_threshold = 0.7
+            boundary_threshold = 30
+            min_contained_boxes = 2
         
         # Combine all boxes
         all_boxes = copy.deepcopy(gt_boxes) + copy.deepcopy(pred_boxes)
@@ -874,10 +888,10 @@ class AnnotatorPage:
                 )
                 
                 if iou > duplicate_iou_threshold:
-                    # Remove smaller box
+                    # Remove larger box (keep smaller one)
                     area1 = box1.w * box1.h
                     area2 = box2.w * box2.h
-                    if area1 < area2:
+                    if area1 > area2:
                         to_remove.add(i)
                         removed_boxes.append(box1)
                     else:
@@ -887,7 +901,7 @@ class AnnotatorPage:
         # Filter out duplicate boxes
         filtered_boxes = [box for i, box in enumerate(all_boxes) if i not in to_remove]
         
-        # 2. Remove large boxes that contain at least one smaller box
+        # 2. Remove large boxes that contain smaller boxes based on strictness level
         to_remove_large = set()
         for i in range(len(filtered_boxes)):
             if i in to_remove_large:
@@ -896,6 +910,8 @@ class AnnotatorPage:
             large_box = filtered_boxes[i]
             large_box_coords = (large_box.x, large_box.y, large_box.x + large_box.w, large_box.y + large_box.h)
             
+            # Count how many smaller boxes are contained in this large box
+            contained_count = 0
             for j in range(len(filtered_boxes)):
                 if i == j or j in to_remove_large:
                     continue
@@ -904,9 +920,12 @@ class AnnotatorPage:
                 small_box_coords = (small_box.x, small_box.y, small_box.x + small_box.w, small_box.y + small_box.h)
                 
                 if self._is_box_inside(small_box_coords, large_box_coords):
-                    to_remove_large.add(i)
-                    removed_boxes.append(large_box)
-                    break
+                    contained_count += 1
+            
+            # Remove large box if it contains enough smaller boxes based on strictness level
+            if contained_count >= min_contained_boxes:
+                to_remove_large.add(i)
+                removed_boxes.append(large_box)
         
         # Filter out large boxes
         filtered_boxes = [box for i, box in enumerate(filtered_boxes) if i not in to_remove_large]
@@ -940,7 +959,7 @@ class AnnotatorPage:
                     ]
                     
                     # Check if similar
-                    if iou > similar_iou_threshold and self._is_boundary_similar(diffs):
+                    if iou > similar_iou_threshold and self._is_boundary_similar(diffs, boundary_threshold):
                         to_remove_similar.add(i)
                         to_remove_similar.add(j)
                         removed_boxes.append(box1)
@@ -978,11 +997,19 @@ class AnnotatorPage:
             inner_box[3] <= outer_box[3]
         )
     
-    def _is_boundary_similar(self, diffs):
-        """Check if boundary differences are similar"""
-        # Check if any 3 sides are within 10 pixels
-        sorted_diffs = sorted(diffs)
-        return sum(1 for d in sorted_diffs[:3] if d <= 10) >= 3
+    def _is_boundary_similar(self, diffs, boundary_threshold):
+        """Check if boundary differences are similar
+        
+        Args:
+            diffs: List of absolute differences [xmin_diff, ymin_diff, xmax_diff, ymax_diff]
+            boundary_threshold: Maximum allowed difference for similarity
+        
+        Returns:
+            True if any two differences are within the threshold
+        """
+        # Check if any two sides are within the boundary threshold
+        count_within_threshold = sum(1 for d in diffs if d <= boundary_threshold)
+        return count_within_threshold >= 2
     
     def _on_save(self):
         """Save current annotations
@@ -1016,7 +1043,9 @@ class AnnotatorPage:
             app_state.config.output_path,
             item.image_path,
             boxes_dict,
-            img_w, img_h
+            img_w, img_h,
+            gt_labels_path=app_state.config.gt_labels_path,
+            class_id_to_name=build_class_id_to_name(app_state.class_mapping),
         )
         
         self.boxes_modified = False
@@ -1268,3 +1297,4 @@ def create_annotator():
     page = AnnotatorPage()
     page.create()
     return page
+

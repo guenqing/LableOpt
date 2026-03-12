@@ -1,8 +1,21 @@
 from pathlib import Path
 from datetime import datetime
 import shutil
-from typing import List, Optional
+from typing import Dict, List, Optional
 import logging
+
+from .label_utils import (
+    SUPPORTED_LABEL_EXTENSIONS,
+    collect_label_keys,
+    find_image_rel_path_for_key,
+    get_label_extension,
+    get_output_label_path,
+    is_tmp_label_file,
+    iter_label_files,
+    resolve_label_path,
+    strip_tmp_suffix,
+    write_label_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +47,9 @@ def backup_folder(folder_path: str) -> str:
 
 
 def save_tmp_annotation(output_path: str, image_rel_path: str,
-                        boxes: List[dict], img_w: int, img_h: int):
+                        boxes: List[dict], img_w: int, img_h: int,
+                        gt_labels_path: str = "",
+                        class_id_to_name: Optional[Dict[int, str]] = None):
     """
     Save temporary annotation file to Output Path.
 
@@ -44,20 +59,29 @@ def save_tmp_annotation(output_path: str, image_rel_path: str,
         boxes: list of box dicts with 'class_id' and 'bbox'
         img_w: image width
         img_h: image height
+        gt_labels_path: optional GT labels root used to preserve original label format
+        class_id_to_name: optional class-id to class-name mapping for XML output
     """
-    from .yolo_utils import write_yolo_label
-
     output_dir = Path(output_path)
     rel_path = Path(image_rel_path)
-    stem = rel_path.stem
-    parent = rel_path.parent
+    key = rel_path.with_suffix('')
 
-    # Create parent directories if needed
-    tmp_dir = output_dir / parent
+    tmp_dir = output_dir / rel_path.parent
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    tmp_path = tmp_dir / f"{stem}_tmp.txt"
-    write_yolo_label(tmp_path, boxes, img_w, img_h)
+    label_ext = '.txt'
+    if gt_labels_path and str(gt_labels_path).strip():
+        label_ext = get_label_extension(Path(gt_labels_path), key, default_ext='.txt')
+
+    tmp_path = get_output_label_path(output_dir, rel_path, label_ext, tmp=True)
+    write_label_file(
+        tmp_path,
+        boxes,
+        img_w,
+        img_h,
+        class_id_to_name=class_id_to_name,
+        image_filename=rel_path.name,
+    )
     logger.debug(f"Saved tmp annotation to {tmp_path}")
 
 
@@ -85,8 +109,9 @@ def get_tmp_files(output_path: str) -> List[str]:
         return []
     
     tmp_files = []
-    for f in output_dir.rglob("*_tmp.txt"):
-        tmp_files.append(str(f.relative_to(output_dir)))
+    for f in iter_label_files(output_dir, exclude_tmp=False):
+        if is_tmp_label_file(f):
+            tmp_files.append(str(f.relative_to(output_dir)))
     return tmp_files
 
 
@@ -110,11 +135,11 @@ def confirm_changes_for_tmp_files(output_path: str, tmp_files: List[str], keep_c
         if not tmp_file.exists():
             missing += 1
             continue
-        if not tmp_file.name.endswith('_tmp.txt'):
+        if not is_tmp_label_file(tmp_file):
             continue
 
-        original_name = tmp_file.name.replace("_tmp.txt", ".txt")
-        original_path = tmp_file.parent / original_name
+        original_rel = strip_tmp_suffix(tmp_file.relative_to(output_dir))
+        original_path = output_dir / original_rel
 
         if keep_changes:
             shutil.move(str(tmp_file), str(original_path))
@@ -169,13 +194,8 @@ def validate_paths(images_path: str, gt_labels_path: str, pred_labels_path: str)
         1 for f in images_dir.rglob('*')
         if f.is_file() and f.suffix.lower() in image_extensions
     )
-    result['gt_count'] = sum(
-        1 for f in gt_dir.rglob('*.txt')
-        if f.is_file() and not f.name.endswith('_tmp.txt')
-    )
-    result['pred_count'] = sum(
-        1 for f in pred_dir.rglob('*.txt') if f.is_file()
-    )
+    result['gt_count'] = len(collect_label_keys(gt_dir, exclude_tmp=True))
+    result['pred_count'] = len(collect_label_keys(pred_dir, exclude_tmp=False))
 
     if result['images_count'] == 0:
         result['valid'] = False
@@ -262,19 +282,21 @@ def should_skip_sample(image_rel_path: str, output_path: str, human_verified_pat
     # Check Output Path
     output_dir = Path(output_path)
     if output_dir.exists():
-        output_label = output_dir / parent / f"{label_stem}.txt"
-        output_tmp = output_dir / parent / f"{label_stem}_tmp.txt"
-        if output_label.exists() or output_tmp.exists():
-            return True
+        for ext in SUPPORTED_LABEL_EXTENSIONS:
+            output_label = output_dir / parent / f"{label_stem}{ext}"
+            output_tmp = output_dir / parent / f"{label_stem}_tmp{ext}"
+            if output_label.exists() or output_tmp.exists():
+                return True
     
     # Check Human Verified Annotation Path (if set)
     if human_verified_path and human_verified_path.strip():
         human_dir = Path(human_verified_path)
         if human_dir.exists():
-            human_label = human_dir / parent / f"{label_stem}.txt"
-            human_tmp = human_dir / parent / f"{label_stem}_tmp.txt"
-            if human_label.exists() or human_tmp.exists():
-                return True
+            for ext in SUPPORTED_LABEL_EXTENSIONS:
+                human_label = human_dir / parent / f"{label_stem}{ext}"
+                human_tmp = human_dir / parent / f"{label_stem}_tmp{ext}"
+                if human_label.exists() or human_tmp.exists():
+                    return True
     
     return False
 
@@ -316,7 +338,6 @@ def collect_annotation_image_paths(
     if pred_dir is not None and not pred_dir.exists():
         raise FileNotFoundError(f"Pred labels directory not found: {pred_labels_path}")
 
-    from .yolo_utils import collect_image_paths, collect_label_keys, find_image_rel_path_for_key
 
     # Case A: images only -> enumerate all images
     if (gt_dir is None) and (pred_dir is None):
@@ -401,19 +422,13 @@ def estimate_pending_analysis_samples(
     if not result['valid']:
         return result
 
-    from .yolo_utils import find_image_rel_path_for_key
 
-    for gt_file in gt_dir.rglob('*.txt'):
-        if not gt_file.is_file():
-            continue
-        if gt_file.name.endswith('_tmp.txt'):
-            continue
-
+    gt_keys = sorted(collect_label_keys(gt_dir, exclude_tmp=True))
+    for key in gt_keys:
         result['total_gt'] += 1
-        key = gt_file.relative_to(gt_dir).with_suffix('')
 
-        pred_label_path = pred_dir / key.with_suffix('.txt')
-        if not pred_label_path.exists():
+        pred_label_path = resolve_label_path(pred_dir, key)
+        if pred_label_path is None:
             result['missing_pred'] += 1
             continue
 
@@ -441,42 +456,27 @@ def _count_image_files(images_dir: Path) -> int:
 
 
 def _collect_processed_label_keys(labels_dir: Path) -> set[Path]:
-    """
-    Collect processed label keys from a labels directory.
-
-    A processed key is the relative path without suffix, normalized so that:
-      a/b/x.txt     -> a/b/x
-      a/b/x_tmp.txt -> a/b/x
-    """
+    """Collect processed label keys from .txt or .xml files."""
     keys: set[Path] = set()
     if not labels_dir.exists():
         return keys
 
-    for p in labels_dir.rglob('*.txt'):
-        if not p.is_file():
-            continue
+    for p in iter_label_files(labels_dir, exclude_tmp=False):
         rel = p.relative_to(labels_dir)
-        name = rel.name
-        if name.endswith('_tmp.txt'):
-            base = name[:-len('_tmp.txt')]
-        else:
-            base = rel.stem
-        keys.add(rel.with_name(base).with_suffix(''))
+        if is_tmp_label_file(p):
+            rel = strip_tmp_suffix(rel)
+        keys.add(rel.with_suffix(''))
 
     return keys
 
 
 def _collect_processed_label_keys_txt_only(labels_dir: Path) -> set[Path]:
-    """Collect processed keys from .txt only (exclude *_tmp.txt)."""
+    """Collect processed keys from finalized .txt or .xml labels only."""
     keys: set[Path] = set()
     if not labels_dir.exists():
         return keys
 
-    for p in labels_dir.rglob('*.txt'):
-        if not p.is_file():
-            continue
-        if p.name.endswith('_tmp.txt'):
-            continue
+    for p in iter_label_files(labels_dir, exclude_tmp=True):
         rel = p.relative_to(labels_dir)
         keys.add(rel.with_suffix(''))
 
@@ -535,7 +535,6 @@ def parse_data_for_dashboard(
     has_pred = pred_dir is not None
     labels_mode = has_gt or has_pred
 
-    from .yolo_utils import collect_label_keys, find_image_rel_path_for_key
 
     image_cache: dict[Path, Optional[Path]] = {}
 
@@ -710,7 +709,6 @@ def estimate_dashboard_counts_and_pending(
     if gt_dir is not None:
         if gt_dir.exists():
             result['gt_exists'] = True
-            from .yolo_utils import collect_label_keys
             gt_keys = collect_label_keys(gt_dir, exclude_tmp=True)
             result['gt_count'] = len(gt_keys)
         else:
@@ -719,7 +717,6 @@ def estimate_dashboard_counts_and_pending(
     if pred_dir is not None:
         if pred_dir.exists():
             result['pred_exists'] = True
-            from .yolo_utils import collect_label_keys
             pred_keys = collect_label_keys(pred_dir, exclude_tmp=False)
             result['pred_count'] = len(pred_keys)
         else:
@@ -764,7 +761,6 @@ def estimate_dashboard_counts_and_pending(
 
     processed_keys = output_keys | human_keys
 
-    from .yolo_utils import find_image_rel_path_for_key
 
     # Determine pending mode and enumerate candidates
     if gt_dir is None and pred_dir is None:

@@ -18,7 +18,7 @@ from ..core.file_manager import (
 )
 from ..core.path_utils import resolve_with_base_dir
 from ..core.analyzer import CleanlabAnalyzer
-from ..core.yolo_utils import read_yolo_label, get_image_size
+from ..core.label_utils import build_class_name_to_id, get_image_size, read_label_file, resolve_label_path
 
 
 class DashboardPage:
@@ -596,7 +596,8 @@ class DashboardPage:
                 gt_labels_path=app_state.config.gt_labels_path,
                 output_path=app_state.config.output_path,
                 human_verified_path=app_state.config.human_verified_path,
-                progress_callback=self._update_progress
+                progress_callback=self._update_progress,
+                class_mapping=app_state.class_mapping,
             )
             
             loop = asyncio.get_event_loop()
@@ -791,16 +792,18 @@ class DashboardPage:
         
         rel_path = Path(item.image_path)
         img_path = images_dir / rel_path
-        gt_label_path = gt_dir / rel_path.with_suffix('.txt')
-        pred_label_path = pred_dir / rel_path.with_suffix('.txt')
+        key = rel_path.with_suffix('')
+        gt_label_path = resolve_label_path(gt_dir, key)
+        pred_label_path = resolve_label_path(pred_dir, key)
+        class_name_to_id = build_class_name_to_id(app_state.class_mapping)
         
         # Load image using matplotlib's imread to avoid PIL dependency
         img = plt.imread(img_path)
         img_h, img_w, _ = img.shape
         
         # Load boxes
-        gt_boxes = read_yolo_label(gt_label_path, img_w, img_h, has_confidence=False)
-        pred_boxes = read_yolo_label(pred_label_path, img_w, img_h, has_confidence=True)
+        gt_boxes = read_label_file(gt_label_path, img_w, img_h, has_confidence=False, class_name_to_id=class_name_to_id)
+        pred_boxes = read_label_file(pred_label_path, img_w, img_h, has_confidence=True, class_name_to_id=class_name_to_id)
         
         # Create figure
         fig, ax = plt.subplots(1, 1, figsize=(10, 7))
