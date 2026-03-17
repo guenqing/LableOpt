@@ -95,38 +95,99 @@ class AnnotatorPage:
             self._show_empty_queue()
             return
         
-        # Add custom styles
+        # Add custom styles (refiner reference style)
         ui.add_head_html('''
         <style>
-            .annotator-container {
-                display: flex;
-                flex-direction: column;
-                height: 100vh;
+            .refiner-annotator-page {
+                background: linear-gradient(145deg, #f0f4f8 0%, #e6ecf3 100%);
+                min-height: 100vh;
+                padding: 1rem;
             }
-            .control-panel {
-                background: #f9fafb;
-                border-left: 1px solid #e5e7eb;
+            .refiner-annotator-glass {
+                max-width: 100%; margin: 0 auto;
+                background: rgba(255, 255, 255, 0.85);
+                backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+                border-radius: 2.5rem;
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255,255,255,0.6) inset;
+                padding: 1.25rem 1.5rem;
             }
+            .refiner-title-section { align-items: center; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.75rem; }
+            .refiner-title-main {
+                font-size: 1.25rem; font-weight: 700;
+                background: linear-gradient(135deg, #1e2b3f, #2c3e5c);
+                -webkit-background-clip: text; background-clip: text; color: transparent;
+                display: flex; align-items: center; gap: 0.5rem;
+            }
+            .refiner-title-icon { background: #1e2b3f; color: white; padding: 0.45rem; border-radius: 1rem; box-shadow: 0 6px 12px rgba(0,20,40,0.15); }
+            .refiner-header-meta { font-size: 0.9rem; color: #1e3b5c; font-weight: 500; }
+            .refiner-main-row { gap: 1rem; flex-wrap: nowrap; align-items: flex-start; }
+            .refiner-preview-panel {
+                background: #101f2e; border-radius: 2rem; overflow: hidden;
+                box-shadow: 0 25px 35px -12px #0b1a2b; border: 1px solid rgba(255,255,255,0.2);
+            }
+            .refiner-preview-header {
+                background: rgba(0,0,0,0.4); backdrop-filter: blur(10px); padding: 0.6rem 1rem;
+                color: #ddeeff; font-weight: 500; font-size: 0.9rem; border-bottom: 1px solid #3a5b7c;
+            }
+            .refiner-preview-screen {
+                background: #112433;
+                background-image: radial-gradient(circle at 20% 30%, #264a6e 0.5px, transparent 1px);
+                background-size: 30px 30px; color: #9bbad0;
+            }
+            .refiner-nav-panel {
+                background: #101f2e; border-radius: 1.5rem; overflow: hidden;
+                border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 20px 30px -12px #0b1a2b;
+            }
+            .refiner-nav-panel .refiner-preview-header { padding: 0.5rem 0.75rem; font-size: 0.8rem; }
+            .refiner-module {
+                background: rgba(255,255,255,0.7); border-radius: 2rem; padding: 1rem 1.2rem;
+                box-shadow: 0 8px 18px -8px rgba(0,20,40,0.08), 0 0 0 1px rgba(0,0,0,0.02) inset;
+                backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+            }
+            .refiner-module-header { font-size: 1rem; font-weight: 600; color: #17324d; margin-bottom: 0.75rem; }
+            .refiner-module-sep { height: 1px; background: #ceddec; margin: 0.75rem 0; }
+            .refiner-btn {
+                border-radius: 40px !important; font-weight: 600 !important;
+                box-shadow: 0 4px 10px rgba(0,30,60,0.04); transition: 0.15s ease;
+            }
+            .refiner-btn:hover { transform: translateY(-2px); }
+            .refiner-btn:active { transform: translateY(0); }
+            .refiner-btn-secondary {
+                background: #eef4fa !important; border: 1px solid #d3e1f0 !important; color: #1e3b5c !important;
+            }
+            .refiner-btn-secondary:hover { background: #e2ebf5 !important; }
+            .refiner-btn-primary {
+                background: #1e3b5c !important; color: white !important;
+                box-shadow: 0 8px 16px -6px rgba(30,59,92,0.38); border: 1px solid rgba(255,255,255,0.25) !important;
+            }
+            .refiner-btn-primary:hover { background: #234b73 !important; }
+            .refiner-btn-accent {
+                background: #2a5f3a !important; color: white !important;
+                box-shadow: 0 8px 16px -6px #1f4b2e; border: 1px solid rgba(255,255,255,0.38) !important;
+            }
+            .refiner-btn-accent:hover { background: #347a47 !important; }
+            .refiner-btn-outline {
+                background: white !important; border: 1px solid #d3e1f0 !important; color: #1e3b5c !important;
+            }
+            .refiner-btn-outline:hover { background: #eef4fa !important; }
+            .refiner-btn-danger {
+                background: #fef2f2 !important; border: 1px solid #fecaca !important; color: #b91c1c !important;
+            }
+            .refiner-btn-danger:hover { background: #fee2e2 !important; }
+            .refiner-module .q-field--outlined .q-field__control::before { border-radius: 12px; border-color: #cbdae9; }
+            .refiner-module .q-field--focused .q-field__control::before { border-color: #2c5f8a; border-width: 2px; }
+            .refiner-module .q-field .q-field__control { border-radius: 12px; }
         </style>
         ''')
         
-        with ui.column().classes('w-full min-h-screen bg-gray-50'):
-            # Header bar
-            self._create_header()
-            
-            # Main content area: Viewer | Navigator | Box List | Config
-            with ui.row().classes('w-full p-4 gap-4 items-start flex-nowrap'):
-                # Column 1: Viewer (main image area)
-                self._create_viewer_area()
-                
-                # Column 2: Navigator (minimap)
-                self._create_navigator_area()
-                
-                # Column 3: Box List panel
-                self._create_box_list_panel()
-                
-                # Column 4: Config panel (no title)
-                self._create_control_panel()
+        with ui.column().classes('w-full min-h-screen refiner-annotator-page'):
+            with ui.element('div').classes('refiner-annotator-glass w-full'):
+                self._create_header()
+                with ui.row().classes('w-full p-4 refiner-main-row items-start'):
+                    self._create_viewer_area()
+                    self._create_navigator_area()
+                    self._create_box_list_panel()
+                    self._create_control_panel()
         
         # Set up page-level keyboard listener for navigation
         self.page_keyboard = ui.keyboard(on_key=self._handle_page_keys, ignore=['input', 'select', 'textarea'])
@@ -144,60 +205,57 @@ class AnnotatorPage:
     
     def _create_header(self):
         """Create header bar with title and navigation info"""
-        with ui.row().classes('w-full bg-white shadow px-4 py-2 items-center gap-4'):
-            # Title and info (no back button - must use "Go Back to Analysis" to ensure save confirmation)
-            with ui.column().classes('flex-grow gap-0'):
-                self.title_label = ui.label('Loading...').classes('text-lg font-semibold text-gray-800')
-                with ui.row().classes('gap-2 items-center'):
-                    self.progress_label = ui.label('').classes('text-sm text-gray-500')
-                    ui.label('|').classes('text-gray-300')
-                    self.issue_info_label = ui.label('').classes('text-sm')
+        with ui.row().classes('w-full refiner-title-section px-0'):
+            with ui.row().classes('items-center gap-3 refiner-title-main flex-grow'):
+                ui.icon('edit', size='sm').classes('refiner-title-icon')
+                self.title_label = ui.label('Loading...').classes('text-lg font-semibold')
+            with ui.row().classes('gap-2 items-center refiner-header-meta'):
+                self.progress_label = ui.label('').classes('text-sm')
+                ui.label('|').classes('text-gray-400')
+                self.issue_info_label = ui.label('').classes('text-sm')
     
     def _create_viewer_area(self):
         """Create the Viewer (main image area) with fixed size"""
-        # Fixed width container for Viewer - prevents layout shift on zoom
         with ui.column().classes('flex-shrink-0 gap-2'):
-            # Viewer container with fixed size
-            viewer_container = ui.column().classes('bg-white rounded-lg shadow p-2')
-            
-            # Create annotator (Viewer only, Navigator created separately)
-            self.annotator = InteractiveAnnotator(
-                on_change=self._on_boxes_changed,
-                on_zoom_change=self._on_zoom_changed,
-                on_display_change=self._on_display_change_from_annotator
-            )
-            # Create Viewer without Navigator (navigator_container=None means no navigator here)
-            self.annotator.create_ui(viewer_container, fixed_width=900, fixed_height=600)
-            
-            # Navigation buttons below Viewer
+            with ui.element('div').classes('refiner-preview-panel'):
+                with ui.row().classes('w-full refiner-preview-header items-center gap-2'):
+                    ui.icon('image', size='sm').classes('text-blue-200')
+                    ui.label('Viewer').classes('text-white font-medium')
+                viewer_container = ui.column().classes('refiner-preview-screen p-2')
+                self.annotator = InteractiveAnnotator(
+                    on_change=self._on_boxes_changed,
+                    on_zoom_change=self._on_zoom_changed,
+                    on_display_change=self._on_display_change_from_annotator
+                )
+                self.annotator.create_ui(viewer_container, fixed_width=900, fixed_height=600)
             with ui.row().classes('w-full justify-center gap-4 mt-2'):
                 self.prev_button = ui.button(
-                    'Prev', 
+                    'Prev',
                     icon='chevron_left',
                     on_click=self._on_prev
-                ).props('outline').tooltip('上一个样本')
-                
+                ).classes('refiner-btn refiner-btn-outline').props('no-caps').tooltip('上一个样本')
                 self.next_button = ui.button(
                     'Next',
                     icon='chevron_right',
                     on_click=self._on_next
-                ).props('outline icon-right').tooltip('下一个样本')
+                ).classes('refiner-btn refiner-btn-outline').props('no-caps icon-right').tooltip('下一个样本')
     
     def _create_navigator_area(self):
         """Create the Navigator (minimap) area"""
-        # Navigator container - fixed size proportional to Viewer
         with ui.column().classes('flex-shrink-0 gap-1'):
-            navigator_container = ui.column().classes('bg-white rounded-lg shadow p-2')
-            # Create Navigator in this container
-            if self.annotator:
-                self.annotator.create_navigator(navigator_container)
+            with ui.element('div').classes('refiner-nav-panel'):
+                with ui.row().classes('w-full refiner-preview-header items-center gap-2'):
+                    ui.icon('map', size='xs').classes('text-blue-200')
+                    ui.label('Navigator').classes('text-white font-medium text-sm')
+                navigator_container = ui.column().classes('refiner-preview-screen p-2')
+                if self.annotator:
+                    self.annotator.create_navigator(navigator_container)
     
     def _create_box_list_panel(self):
         """Create box list panel showing all GT and Pred boxes"""
-        # Box List panel - height matches Config panel
-        with ui.card().classes('w-48 flex-shrink-0'):
+        with ui.card().classes('w-48 flex-shrink-0 refiner-module'):
             with ui.column().classes('w-full p-3 gap-2'):
-                ui.label('Box List').classes('text-sm font-bold text-gray-700')
+                ui.label('Box List').classes('refiner-module-header text-sm font-bold')
                 
                 # Scrollable container for box list - use flex-grow to fill available height
                 with ui.scroll_area().classes('w-full').style('height: 580px;') as scroll_area:
@@ -288,10 +346,9 @@ class AnnotatorPage:
     
     def _create_control_panel(self):
         """Create control panel (Config) on the right side - no title"""
-        with ui.card().classes('w-56 flex-shrink-0'):
+        with ui.card().classes('w-56 flex-shrink-0 refiner-module'):
             with ui.column().classes('w-full p-3 gap-3'):
-                # Display Options
-                ui.label('Display Options').classes('text-sm font-bold text-gray-700')
+                ui.label('Display Options').classes('refiner-module-header text-sm font-bold')
                 with ui.column().classes('gap-1'):
                     self.auto_focus_checkbox = ui.checkbox(
                         'Auto Focus',
@@ -309,32 +366,30 @@ class AnnotatorPage:
                         on_change=self._on_display_change
                     ).classes('text-sm')
                 
-                ui.separator()
+                ui.separator().classes('refiner-module-sep')
                 
-                # Zoom Controls
-                ui.label('Zoom Controls').classes('text-sm font-bold text-gray-700')
+                ui.label('Zoom Controls').classes('refiner-module-header text-sm font-bold')
                 with ui.column().classes('gap-2 w-full'):
                     with ui.row().classes('items-center gap-2'):
                         self.zoom_label = ui.label('1x').classes('text-sm font-mono w-8')
-                        ui.button(icon='remove', on_click=self._zoom_out).props('flat dense size=sm').tooltip('缩小')
-                        ui.button(icon='add', on_click=self._zoom_in).props('flat dense size=sm').tooltip('放大')
-                        ui.button('Reset', on_click=self._zoom_reset).props('flat dense size=sm').tooltip('重置缩放')
+                        ui.button(icon='remove', on_click=self._zoom_out).classes('refiner-btn refiner-btn-secondary').props('flat dense size=sm round').tooltip('缩小')
+                        ui.button(icon='add', on_click=self._zoom_in).classes('refiner-btn refiner-btn-secondary').props('flat dense size=sm round').tooltip('放大')
+                        ui.button('Reset', on_click=self._zoom_reset).classes('refiner-btn refiner-btn-secondary').props('flat dense size=sm').tooltip('重置缩放')
                     
                     self.zoom_slider = ui.slider(
                         min=1, max=20, step=0.01, value=1,
                         on_change=self._on_zoom_slider
                     ).classes('w-full')
                 
-                ui.separator()
+                ui.separator().classes('refiner-module-sep')
                 
-                # Box Actions (one-click operations)
-                ui.label('Box Actions').classes('text-sm font-bold text-gray-700')
+                ui.label('Box Actions').classes('refiner-module-header text-sm font-bold')
                 with ui.column().classes('gap-2 w-full'):
                     ui.button(
                         'Swap Editable',
                         icon='swap_horiz',
                         on_click=self._on_swap_editable
-                    ).classes('w-full text-xs').props('outline dense').tooltip(
+                    ).classes('w-full text-xs refiner-btn refiner-btn-secondary').props('no-caps dense').tooltip(
                         '交换可编辑状态：可编辑框变为参考框，参考框变为可编辑框'
                     )
                     
@@ -342,7 +397,7 @@ class AnnotatorPage:
                         'Clear Editable',
                         icon='delete_sweep',
                         on_click=self._on_clear_editable
-                    ).classes('w-full text-xs').props('outline dense color=negative').tooltip(
+                    ).classes('w-full text-xs refiner-btn refiner-btn-danger').props('no-caps dense').tooltip(
                         '删除所有可编辑框'
                     )
                     
@@ -350,7 +405,7 @@ class AnnotatorPage:
                         'Activate Reference',
                         icon='check_circle',
                         on_click=self._on_activate_reference
-                    ).classes('w-full text-xs').props('outline dense color=positive').tooltip(
+                    ).classes('w-full text-xs refiner-btn refiner-btn-accent').props('no-caps dense').tooltip(
                         '将所有参考框变为可编辑'
                     )
                     
@@ -371,10 +426,9 @@ class AnnotatorPage:
                             on_change=self._on_clean_threshold_change
                         ).props('inline').classes('text-xs')
                 
-                ui.separator()
+                ui.separator().classes('refiner-module-sep')
                 
-                # Save Controls
-                ui.label('Save Controls').classes('text-sm font-bold text-gray-700')
+                ui.label('Save Controls').classes('refiner-module-header text-sm font-bold')
                 with ui.column().classes('gap-2 w-full'):
                     self.extend_gt_to_next_checkbox = ui.checkbox(
                         'Extend GT to Next',
@@ -405,16 +459,16 @@ class AnnotatorPage:
                         'Save',
                         icon='save',
                         on_click=self._on_save
-                    ).classes('w-full').tooltip('保存标注')
+                    ).classes('w-full refiner-btn refiner-btn-accent').props('no-caps').tooltip('保存标注')
                 
-                ui.separator()
+                ui.separator().classes('refiner-module-sep')
                 
                 # Navigation
                 ui.button(
                     'Go Back to Analysis',
                     icon='analytics',
                     on_click=self._on_back
-                ).classes('w-full').props('outline').tooltip('返回分析页面')
+                ).classes('w-full refiner-btn refiner-btn-outline').props('no-caps').tooltip('返回分析页面')
                 
                 # Keyboard shortcuts info
                 with ui.expansion('Keyboard Shortcuts', icon='keyboard').classes('w-full text-xs'):

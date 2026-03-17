@@ -94,63 +94,149 @@ class DashboardPage:
         """Create the dashboard page"""
         ui.add_head_html('''
         <style>
+            .refiner-dashboard-page {
+                background: linear-gradient(145deg, #f0f4f8 0%, #e6ecf3 100%);
+                min-height: 100vh;
+                padding: 1.5rem;
+            }
+            .refiner-glass-card {
+                max-width: 1600px;
+                margin: 0 auto;
+                background: rgba(255, 255, 255, 0.85);
+                backdrop-filter: blur(12px);
+                -webkit-backdrop-filter: blur(12px);
+                border-radius: 2.5rem;
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255,255,255,0.6) inset;
+                padding: 2rem 2.2rem;
+            }
+            .refiner-title-section { align-items: baseline; justify-content: space-between; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem; }
+            .refiner-title-main {
+                font-size: 2rem; font-weight: 700;
+                background: linear-gradient(135deg, #1e2b3f, #2c3e5c);
+                -webkit-background-clip: text; background-clip: text; color: transparent;
+                display: flex; align-items: center; gap: 0.75rem;
+            }
+            .refiner-title-icon {
+                background: #1e2b3f; color: white; padding: 0.6rem; border-radius: 1.5rem;
+                box-shadow: 0 6px 12px rgba(0,20,40,0.15);
+            }
+            .refiner-status-badge {
+                background: #d4e2ed; border-radius: 100px; padding: 0.5rem 1.2rem;
+                font-size: 0.9rem; font-weight: 500; color: #1e3b5c;
+                display: flex; align-items: center; gap: 0.5rem;
+            }
+            .refiner-dashboard-grid { gap: 1.5rem; flex-wrap: nowrap; }
+            .refiner-module {
+                background: rgba(255,255,255,0.7); border-radius: 2rem; padding: 1.25rem 1.5rem;
+                box-shadow: 0 8px 18px -8px rgba(0,20,40,0.08), 0 0 0 1px rgba(0,0,0,0.02) inset;
+                backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+            }
+            .refiner-module-header { font-size: 1.1rem; font-weight: 600; color: #17324d; margin-bottom: 1rem; }
+            .refiner-viz-wrapper { padding: 1.25rem 0; align-self: start; width: 100%; }
+            .refiner-preview-panel {
+                background: #101f2e; border-radius: 2rem; overflow: hidden;
+                box-shadow: 0 25px 35px -12px #0b1a2b; border: 1px solid rgba(255,255,255,0.2); min-height: 320px;
+            }
+            .refiner-preview-header {
+                background: rgba(0,0,0,0.4); backdrop-filter: blur(10px); padding: 0.75rem 1.25rem;
+                color: #ddeeff; font-weight: 500; border-bottom: 1px solid #3a5b7c;
+            }
+            .refiner-preview-screen {
+                flex: 1; display: flex; align-items: center; justify-content: center;
+                background: #112433; background-image: radial-gradient(circle at 20% 30%, #264a6e 0.5px, transparent 1px);
+                background-size: 30px 30px; color: #9bbad0; padding: 1.5rem; min-height: 280px;
+            }
+            .refiner-issue-card { border-radius: 1.5rem; padding: 1rem; }
+            .refiner-issue-card.overlooked { border-left: 4px solid #f59e0b; }
+            .refiner-issue-card.swapped { border-left: 4px solid #ef4444; }
+            .refiner-issue-card.badloc { border-left: 4px solid #8b5cf6; }
+            .refiner-pending-value { color: #1e3b5c; }
+            .refiner-btn {
+                border-radius: 40px !important; font-weight: 600 !important;
+                box-shadow: 0 4px 10px rgba(0,30,60,0.04); transition: 0.15s ease;
+            }
+            .refiner-btn:hover { transform: translateY(-2px); }
+            .refiner-btn:active { transform: translateY(0); box-shadow: 0 2px 6px rgba(0,0,0,0.02); }
+            .refiner-btn-secondary {
+                background: #eef4fa !important; border: 1px solid #d3e1f0 !important; color: #1e3b5c !important;
+            }
+            .refiner-btn-secondary:hover { background: #e2ebf5 !important; }
+            .refiner-btn-primary {
+                background: #1e3b5c !important; color: white !important;
+                box-shadow: 0 8px 16px -6px rgba(30,59,92,0.38); border: 1px solid rgba(255,255,255,0.25) !important;
+            }
+            .refiner-btn-primary:hover { background: #234b73 !important; box-shadow: 0 14px 22px -8px #0f2a40; }
+            .refiner-btn-accent {
+                background: #2a5f3a !important; color: white !important;
+                box-shadow: 0 8px 16px -6px #1f4b2e; border: 1px solid rgba(255,255,255,0.38) !important;
+            }
+            .refiner-btn-accent:hover { background: #347a47 !important; box-shadow: 0 14px 22px -8px #1d4627; }
+            .refiner-footer-note {
+                margin-top: 1.5rem; text-align: right; font-size: 0.8rem; color: #6f8aac;
+                border-top: 1px solid #ceddec; padding-top: 1rem;
+            }
             .issue-item { transition: background-color 0.15s; }
-            .issue-item:hover { background-color: #e5e7eb; }
+            .issue-item:hover { background-color: #e7f0fa; }
             .issue-item-selected { background-color: #dbeafe !important; }
             .issue-list { scrollbar-width: thin; }
-            .viz-placeholder { 
-                display: flex; 
-                align-items: center; 
-                justify-content: center;
-                background: linear-gradient(135deg, #f0f4f8 0%, #d9e2ec 100%);
-                color: #627d98;
+            .refiner-viz-placeholder {
+                display: flex; align-items: center; justify-content: center; width: 100%; min-height: 200px;
+                background: #112433; background-image: radial-gradient(circle at 20% 30%, #264a6e 0.5px, transparent 1px);
+                background-size: 30px 30px; color: #9bbad0; border-radius: 0 0 1.5rem 1.5rem;
             }
+            .refiner-module .q-field--outlined .q-field__control::before { border-radius: 12px; border-color: #cbdae9; }
+            .refiner-module .q-field--focused .q-field__control::before { border-color: #2c5f8a; border-width: 2px; }
+            .refiner-module .q-field .q-field__control { border-radius: 12px; }
+            .refiner-module .q-field--outlined .q-field__control { border-radius: 12px; }
+            .refiner-module .q-linear-progress__track { border-radius: 4px; }
+            .refiner-module .q-linear-progress__model { border-radius: 4px; }
         </style>
         ''')
         
-        with ui.column().classes('w-full min-h-screen bg-gray-100'):
-            # Header
-            with ui.row().classes('w-full bg-white shadow px-6 py-3 items-center gap-3'):
-                ui.icon('auto_fix_high', size='28px').classes('text-indigo-600')
-                ui.label('Annotation Refiner').classes('text-xl font-bold text-gray-800')
-            
-            # Main content - horizontal layout
-            with ui.row().classes('w-full p-4 gap-4 flex-nowrap'):
-                # Left: Configuration panel (narrow)
-                self._create_config_panel()
+        with ui.column().classes('w-full min-h-screen refiner-dashboard-page'):
+            with ui.element('div').classes('refiner-glass-card'):
+                with ui.row().classes('w-full refiner-title-section'):
+                    with ui.row().classes('items-center gap-3 refiner-title-main'):
+                        ui.icon('auto_fix_high', size='28px').classes('refiner-title-icon')
+                        ui.label('Annotation Refiner').classes('text-xl font-bold')
+                    with ui.row().classes('items-center gap-2 refiner-status-badge'):
+                        ui.icon('check_circle', size='sm').classes('text-green-600')
+                        ui.label('Ready').classes('text-sm font-medium')
                 
-                # Middle: Issue lists (3 columns)
-                self._create_issue_lists()
+                with ui.row().classes('w-full p-0 refiner-dashboard-grid flex-nowrap'):
+                    self._create_config_panel()
+                    self._create_issue_lists()
+                    self._create_viz_panel()
                 
-                # Right: Visualization panel
-                self._create_viz_panel()
+                with ui.row().classes('w-full refiner-footer-note'):
+                    ui.label('Cleanlab analysis and annotation refinement').classes('w-full text-right')
     
     def _create_config_panel(self):
         """Create configuration panel"""
-        with ui.card().classes('w-72 flex-shrink-0 shadow'):
+        with ui.card().classes('w-72 flex-shrink-0 refiner-module'):
             with ui.column().classes('w-full p-4 gap-3'):
-                ui.label('Configuration').classes('text-base font-bold text-gray-700')
+                ui.label('Configuration').classes('refiner-module-header text-base font-bold')
 
                 ui.label(f'Base Dir: {app_state.config.base_dir}').classes('text-[10px] text-gray-400 break-all')
                 
                 # Images path
                 ui.label('Images Path').classes('text-xs font-medium text-gray-500 mt-1')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.images_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
+                    self.images_input = ui.input().classes('flex-grow refiner-input').props('dense outlined size=small placeholder="relative to base dir"')
                     self.images_status = ui.label('').classes('text-xs whitespace-nowrap')
                 self.images_count_label = ui.label('').classes('text-[10px] text-gray-400')
                 
                 # GT Labels path
                 ui.label('GT Labels Path (opt)').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.gt_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
+                    self.gt_input = ui.input().classes('flex-grow refiner-input').props('dense outlined size=small placeholder="relative to base dir"')
                     self.gt_status = ui.label('').classes('text-xs whitespace-nowrap')
                 self.gt_count_label = ui.label('').classes('text-[10px] text-gray-400')
                 
                 # Pred Labels path
                 ui.label('Pred Labels Path (opt)').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.pred_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
+                    self.pred_input = ui.input().classes('flex-grow refiner-input').props('dense outlined size=small placeholder="relative to base dir"')
                     self.pred_status = ui.label('').classes('text-xs whitespace-nowrap')
                 self.pred_count_label = ui.label('').classes('text-[10px] text-gray-400')
 
@@ -163,42 +249,40 @@ class DashboardPage:
                 # Output Path
                 ui.label('Output Path').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.output_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
+                    self.output_input = ui.input().classes('flex-grow refiner-input').props('dense outlined size=small placeholder="relative to base dir"')
                     self.output_status = ui.label('').classes('text-xs whitespace-nowrap')
                 self.output_count_label = ui.label('').classes('text-[10px] text-gray-400')
                 
                 # Human Verified Annotation Path
                 ui.label('Human Verified Annotation Path (opt)').classes('text-xs font-medium text-gray-500')
                 with ui.row().classes('w-full items-center gap-1'):
-                    self.human_verified_input = ui.input().classes('flex-grow').props('dense outlined size=small placeholder="relative to base dir"')
+                    self.human_verified_input = ui.input().classes('flex-grow refiner-input').props('dense outlined size=small placeholder="relative to base dir"')
                     self.human_status = ui.label('').classes('text-xs whitespace-nowrap')
                 self.human_count_label = ui.label('').classes('text-[10px] text-gray-400')
                 
                 # Classes file
                 ui.label('Classes File (opt)').classes('text-xs font-medium text-gray-500')
-                self.classes_input = ui.input().classes('w-full').props('dense outlined size=small')
+                self.classes_input = ui.input().classes('w-full refiner-input').props('dense outlined size=small')
 
                 # Pending analysis samples
                 with ui.row().classes('w-full items-center justify-between mt-1'):
                     ui.label('Pending Samples').classes('text-xs font-medium text-gray-500')
-                    self.pending_count = ui.label('--').classes('text-lg font-bold text-indigo-700')
+                    self.pending_count = ui.label('--').classes('text-lg font-bold refiner-pending-value')
                 self.pending_detail = ui.label('').classes('text-[10px] text-gray-400')
                 
                 ui.separator().classes('my-2')
                 
-                # Parse data button
                 self.parse_button = ui.button(
                     'Parse Data',
                     on_click=self._on_parse_data,
                     icon='auto_fix_high'
-                ).classes('w-full').props('color=negative').tooltip('手动触发路径解析与统计')
+                ).classes('w-full refiner-btn refiner-btn-secondary').props('no-caps').tooltip('手动触发路径解析与统计')
 
-                # Run button
                 self.run_button = ui.button(
                     'RUN ANALYSIS',
                     on_click=self._run_analysis,
                     icon='play_arrow'
-                ).classes('w-full').props('color=primary').tooltip('运行分析（需设置Images、GT、Pred路径）')
+                ).classes('w-full refiner-btn refiner-btn-primary').props('no-caps').tooltip('运行分析（需设置Images、GT、Pred路径）')
                 
                 # Progress
                 self.progress_label = ui.label('').classes('text-xs text-gray-500')
@@ -230,46 +314,40 @@ class DashboardPage:
     def _create_issue_lists(self):
         """Create the three issue list columns"""
         with ui.column().classes('flex-shrink-0 gap-2'):
-            # Three issue columns (header row aligned with config panel)
             with ui.row().classes('gap-2'):
-                # Overlooked
-                with ui.card().classes('w-56 shadow').style('border-left: 4px solid #f59e0b'):
+                with ui.card().classes('w-56 refiner-module refiner-issue-card overlooked'):
                     with ui.column().classes('w-full p-2 gap-1'):
                         with ui.row().classes('items-center justify-between'):
                             self.overlooked_checkbox = ui.checkbox('Overlooked', value=True).classes('text-sm')
                             self.overlooked_count = ui.badge('0').props('color=orange')
                         self.overlooked_container = ui.scroll_area().classes('w-full h-80 issue-list')
                 
-                # Swapped
-                with ui.card().classes('w-56 shadow').style('border-left: 4px solid #ef4444'):
+                with ui.card().classes('w-56 refiner-module refiner-issue-card swapped'):
                     with ui.column().classes('w-full p-2 gap-1'):
                         with ui.row().classes('items-center justify-between'):
                             self.swapped_checkbox = ui.checkbox('Swapped', value=True).classes('text-sm')
                             self.swapped_count = ui.badge('0').props('color=red')
                         self.swapped_container = ui.scroll_area().classes('w-full h-80 issue-list')
                 
-                # Bad Located
-                with ui.card().classes('w-56 shadow').style('border-left: 4px solid #8b5cf6'):
+                with ui.card().classes('w-56 refiner-module refiner-issue-card badloc'):
                     with ui.column().classes('w-full p-2 gap-1'):
                         with ui.row().classes('items-center justify-between'):
                             self.badloc_checkbox = ui.checkbox('Bad Located', value=True).classes('text-sm')
                             self.badloc_count = ui.badge('0').props('color=purple')
                         self.badloc_container = ui.scroll_area().classes('w-full h-80 issue-list')
             
-            # TopK control row (below issue lists)
             with ui.row().classes('items-center gap-2 mt-2'):
                 ui.label('TopK:').classes('text-xs text-gray-500')
-                self.topk_input = ui.number(value=10, min=1, max=1000, step=1).classes('w-16').props('dense outlined size=small')
-                self.refresh_button = ui.button(icon='refresh', on_click=self._on_refresh_topk).props('flat dense size=sm').tooltip('刷新TopK结果')
+                self.topk_input = ui.number(value=10, min=1, max=1000, step=1).classes('w-16 refiner-input').props('dense outlined size=small')
+                self.refresh_button = ui.button(icon='refresh', on_click=self._on_refresh_topk).classes('refiner-btn refiner-btn-secondary').props('flat dense size=sm round').tooltip('刷新TopK结果')
                 self.refresh_button.disable()
             
-            # Go to annotation button
             with ui.row().classes('justify-end mt-2'):
                 self.goto_button = ui.button(
                     'Go to Annotation Tool',
                     on_click=self._goto_annotation,
                     icon='edit'
-                ).props('color=positive').tooltip('进入标注工具（分析模式或直接标注模式）')
+                ).classes('refiner-btn refiner-btn-accent').props('no-caps').tooltip('进入标注工具（分析模式或直接标注模式）')
                 self.goto_button.disable()
         
         # Bind checkbox events
@@ -279,16 +357,15 @@ class DashboardPage:
     
     def _create_viz_panel(self):
         """Create visualization panel"""
-        with ui.card().classes('flex-grow shadow'):
-            with ui.column().classes('w-full h-full p-3 gap-2'):
-                ui.label('Visualization').classes('text-base font-bold text-gray-700')
-                self.viz_info = ui.label('Click an issue to visualize').classes('text-xs text-gray-500')
-                
-                # Fixed size container for visualization
-                self.viz_container = ui.column().classes('w-full flex-grow items-center justify-center')
+        with ui.element('div').classes('refiner-viz-wrapper flex-grow'):
+            with ui.card().classes('w-full refiner-preview-panel'):
+                with ui.row().classes('w-full refiner-preview-header items-center gap-2'):
+                    ui.icon('chart_area', size='sm').classes('text-blue-200')
+                    ui.label('Visualization').classes('text-white font-medium')
+                    self.viz_info = ui.label('Click an issue to visualize').classes('text-blue-200 text-xs')
+                self.viz_container = ui.column().classes('w-full refiner-preview-screen items-center justify-center gap-2')
                 with self.viz_container:
-                    # Placeholder
-                    with ui.element('div').classes('w-full h-80 viz-placeholder rounded'):
+                    with ui.element('div').classes('w-full refiner-viz-placeholder'):
                         ui.label('Select an issue from the list').classes('text-lg')
     
     def _on_path_change(self, e=None):

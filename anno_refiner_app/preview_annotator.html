@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Annotation Refiner - Annotator (Style Preview)</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+        body {
+            background: linear-gradient(145deg, #f0f4f8 0%, #e6ecf3 100%);
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        .glass-card {
+            max-width: 100%;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 2.5rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255,255,255,0.6) inset;
+            padding: 1.25rem 1.5rem;
+        }
+        .title-section {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+        .title-main {
+            font-size: 1.25rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #1e2b3f, #2c3e5c);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .title-main i {
+            background: #1e2b3f;
+            color: white;
+            padding: 0.45rem;
+            border-radius: 1rem;
+            font-size: 1rem;
+            box-shadow: 0 6px 12px rgba(0,20,40,0.15);
+        }
+        .header-meta {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            color: #1e3b5c;
+            font-weight: 500;
+        }
+        .header-meta span.sep { color: #9bb6d0; }
+
+        /* Main row: Viewer | Navigator | Box List | Config (layout unchanged) */
+        .main-row {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 1rem;
+            align-items: flex-start;
+        }
+        .col-viewer { flex-shrink: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+        .col-navigator { flex-shrink: 0; }
+        .col-boxlist { flex-shrink: 0; width: 192px; }
+        .col-config { flex-shrink: 0; width: 224px; }
+
+        /* Reference: dark preview panel */
+        .preview-panel {
+            background: #101f2e;
+            border-radius: 2rem;
+            box-shadow: 0 25px 35px -12px #0b1a2b;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .preview-header {
+            background: rgba(0,0,0,0.4);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            padding: 0.6rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #ddeeff;
+            font-weight: 500;
+            font-size: 0.9rem;
+            border-bottom: 1px solid #3a5b7c;
+        }
+        .preview-header i { font-size: 0.9rem; color: #9bbad0; }
+        .preview-screen {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #112433;
+            background-image: radial-gradient(circle at 20% 30%, #264a6e 0.5px, transparent 1px);
+            background-size: 30px 30px;
+            color: #9bbad0;
+            font-size: 0.9rem;
+            width: 900px;
+            height: 600px;
+        }
+        .nav-panel {
+            background: #101f2e;
+            border-radius: 1.5rem;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.2);
+            box-shadow: 0 20px 30px -12px #0b1a2b;
+        }
+        .nav-panel .preview-header { padding: 0.5rem 0.75rem; font-size: 0.8rem; }
+        .nav-panel .preview-screen {
+            width: 300px;
+            height: 200px;
+            font-size: 0.8rem;
+        }
+
+        /* Reference: button pair (Prev/Next) */
+        .button-pair {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .btn {
+            border: none;
+            padding: 0.5rem 1.2rem;
+            border-radius: 40px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 10px rgba(0, 30, 60, 0.04);
+            cursor: pointer;
+            transition: 0.15s ease;
+            color: #1e3b5c;
+            background: #eef4fa;
+            border: 1px solid #d3e1f0;
+        }
+        .btn:hover { background: #e2ebf5; transform: translateY(-2px); }
+        .btn i { font-size: 1rem; }
+
+        /* Reference: module card */
+        .module {
+            background: rgba(255,255,255,0.7);
+            border-radius: 2rem;
+            padding: 1rem 1.2rem;
+            box-shadow: 0 8px 18px -8px rgba(0,20,40,0.08), 0 0 0 1px rgba(0,0,0,0.02) inset;
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+        }
+        .module-header {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+            color: #17324d;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .module-header i { color: #2c5f8a; width: 1.2rem; text-align: center; }
+        .module-sep {
+            height: 1px;
+            background: #ceddec;
+            margin: 0.75rem 0;
+        }
+
+        .checkbox-row { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; font-size: 0.9rem; color: #1e3b5c; }
+        .zoom-row { display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0; }
+        .zoom-row .zoom-value { font-size: 0.9rem; font-family: monospace; min-width: 2rem; color: #17324d; }
+        .btn-sm { padding: 0.35rem 0.6rem; font-size: 0.8rem; }
+        .btn-block { width: 100%; margin-bottom: 0.4rem; justify-content: center; }
+        .btn-primary { background: #1e3b5c; color: white; border-color: #1e3b5c; box-shadow: 0 8px 16px -6px #1e3b5c60; }
+        .btn-primary:hover { background: #234b73; }
+        .btn-accent { background: #2a5f3a; color: white; border-color: #2a5f3a; }
+        .btn-accent:hover { background: #347a47; }
+        .btn-danger { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+        .btn-danger:hover { background: #fee2e2; }
+
+        .label-sm { font-size: 0.85rem; font-weight: 600; color: #17324d; margin-bottom: 0.25rem; }
+        .label-xs { font-size: 0.75rem; color: #6f8aac; margin-top: 0.15rem; }
+        .radio-inline { font-size: 0.8rem; color: #475569; }
+        .radio-inline label { margin-right: 0.75rem; }
+
+        .box-list { max-height: 580px; overflow-y: auto; }
+        .box-item {
+            padding: 0.4rem 0.5rem;
+            border-radius: 12px;
+            margin-bottom: 0.25rem;
+            font-size: 0.8rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            background: #edf3f9;
+            border: 1px solid transparent;
+            transition: 0.1s ease;
+        }
+        .box-item:hover { background: #e2ebf5; border-color: #cbdae9; }
+        .box-item.gt { background: #dcfce7; color: #166534; }
+        .box-item.gt:hover { background: #bbf7d0; }
+        .box-item.pred { background: #dbeafe; color: #1e40af; }
+        .box-item.pred:hover { background: #bfdbfe; }
+        .box-item .idx { font-weight: 600; }
+        .box-item .meta { font-size: 0.7rem; color: #64748b; }
+
+        .footer-note { margin-top: 1rem; text-align: right; font-size: 0.75rem; color: #6f8aac; border-top: 1px solid #ceddec; padding-top: 0.75rem; }
+        .footer-note a { color: #2c5f8a; text-decoration: none; margin-right: 1rem; }
+    </style>
+</head>
+<body>
+    <div class="glass-card">
+        <header class="title-section">
+            <div class="title-main">
+                <i class="fas fa-edit"></i>
+                sample/images/001.jpg
+            </div>
+            <div class="header-meta">
+                <span>3 / 24</span>
+                <span class="sep">|</span>
+                <span>Overlooked 0.892</span>
+            </div>
+        </header>
+
+        <div class="main-row">
+            <div class="col-viewer">
+                <div class="preview-panel">
+                    <div class="preview-header"><i class="fas fa-image"></i> Viewer</div>
+                    <div class="preview-screen">900 x 600</div>
+                </div>
+                <div class="button-pair">
+                    <button class="btn"><i class="fas fa-chevron-left"></i> Prev</button>
+                    <button class="btn"><i class="fas fa-chevron-right"></i> Next</button>
+                </div>
+            </div>
+
+            <div class="col-navigator">
+                <div class="nav-panel">
+                    <div class="preview-header"><i class="fas fa-map"></i> Navigator</div>
+                    <div class="preview-screen">Minimap</div>
+                </div>
+            </div>
+
+            <div class="col-boxlist module">
+                <div class="module-header"><i class="fas fa-list"></i> Box List</div>
+                <div class="box-list">
+                    <div class="box-item gt"><div><span class="idx">GT #0</span><br><span class="meta">Class: 0  Size: 120x80</span></div><i class="fas fa-eye"></i></div>
+                    <div class="box-item gt"><div><span class="idx">GT #1</span><br><span class="meta">Class: 1  Size: 95x60</span></div><i class="fas fa-eye"></i></div>
+                    <div class="box-item pred"><div><span class="idx">Pred #0</span><br><span class="meta">Class: 0 (ref)</span></div><i class="fas fa-eye"></i></div>
+                </div>
+            </div>
+
+            <div class="col-config module">
+                <div class="module-header"><i class="fas fa-sliders-h"></i> Display Options</div>
+                <label class="checkbox-row"><input type="checkbox" checked> Auto Focus</label>
+                <label class="checkbox-row"><input type="checkbox" checked> Show GT</label>
+                <label class="checkbox-row"><input type="checkbox" checked> Show Pred</label>
+
+                <div class="module-sep"></div>
+                <div class="module-header"><i class="fas fa-search-plus"></i> Zoom Controls</div>
+                <div class="zoom-row">
+                    <span class="zoom-value">1x</span>
+                    <button class="btn btn-sm"><i class="fas fa-minus"></i></button>
+                    <button class="btn btn-sm"><i class="fas fa-plus"></i></button>
+                    <button class="btn btn-sm">Reset</button>
+                </div>
+                <input type="range" min="1" max="20" step="0.01" value="1" style="width:100%; margin:0.25rem 0;">
+
+                <div class="module-sep"></div>
+                <div class="module-header"><i class="fas fa-vector-square"></i> Box Actions</div>
+                <button class="btn btn-block btn-sm">Swap Editable</button>
+                <button class="btn btn-block btn-sm btn-danger">Clear Editable</button>
+                <button class="btn btn-block btn-sm">Activate Reference</button>
+                <label class="checkbox-row"><input type="checkbox"> Clean Annotations</label>
+                <div class="label-xs">Threshold</div>
+                <div class="radio-inline">
+                    <label><input type="radio" name="th" checked> Low</label>
+                    <label><input type="radio" name="th"> Medium</label>
+                    <label><input type="radio" name="th"> High</label>
+                </div>
+
+                <div class="module-sep"></div>
+                <div class="module-header"><i class="fas fa-save"></i> Save Controls</div>
+                <label class="checkbox-row"><input type="checkbox"> Extend GT to Next</label>
+                <label class="checkbox-row"><input type="checkbox"> Prefer Previous on Overlap</label>
+                <label class="checkbox-row"><input type="checkbox" checked> Auto Save</label>
+                <label class="checkbox-row"><input type="checkbox" checked> Save Unmodified</label>
+                <button class="btn btn-block btn-accent"><i class="fas fa-save"></i> Save</button>
+
+                <div class="module-sep"></div>
+                <button class="btn btn-block"><i class="fas fa-chart-line"></i> Go Back to Analysis</button>
+
+                <div class="module-sep"></div>
+                <details class="label-xs" style="margin-top:0.5rem;">
+                    <summary style="cursor:pointer;">Keyboard Shortcuts</summary>
+                    <div style="margin-top:0.35rem; line-height:1.5;">
+                        [ / ] Prev/Next  Del Delete  =/- Zoom  0 Reset<br>
+                        q/w Show GT/Pred  e Swap  r Clear  t Activate<br>
+                        Ctrl+Z/Y Undo/Redo
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div class="footer-note">
+            <a href="preview_dashboard.html">Preview Dashboard</a>
+            Style reference only; layout matches annotator page.
+        </div>
+    </div>
+</body>
+</html>
